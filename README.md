@@ -81,7 +81,7 @@ Streaming:
 ## Quick Start
 
 ```bash
-git clone https://github.com/yourusername/jeeves.git
+git clone https://github.com/GeneralMillz/pi-claw.git
 cd jeeves
 chmod +x install.sh
 ./install.sh
