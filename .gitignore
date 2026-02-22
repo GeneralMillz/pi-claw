@@ -1,0 +1,38 @@
+# Environment
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+*.egg-info/
+
+# Credentials
+config/google_credentials.json
+config/google_token.json
+
+# Logs
+logs/
+*.log
+*.jsonl
+
+# History
+history/
+
+# Personal memory (contains private info)
+memory/personal.md
+memory/family.md
+memory/dnd.md
+
+# VS Code
+.vscode/
+*.copilot_prompt.md
+
+# Node
+node_modules/
+npm-debug.log
+
+# OS
+.DS_Store
+Thumbs.db
