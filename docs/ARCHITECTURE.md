@@ -1,189 +1,225 @@
-# Jeeves — Architecture
+# Architecture
+
+## Overview
+
+Jeeves runs as two systemd services on a Raspberry Pi 5:
+
+| Service | Process | Port |
+|---------|---------|------|
+| `pi-assistant.service` | HTTP daemon + brain + supervisor | 8001 |
+| `pi-discord-bot.service` | asyncio Discord client | — |
 
 ---
 
 ## Request Lifecycle
 
-```
-1. User types: "jeeves !task build a flask app"
-
-2. Discord bot (core.py → on_message):
-   - Verify server is in SERVER_CONFIG
-   - Verify channel is in allowed_channels
-   - Check rate limit
-   - extract_prompt() → strips activation word → "!task build a flask app"
-   - register_stream_channel() → tracks which channel to send notify updates to
-   - _process_and_respond() → shows typing indicator
-
-3. call_daemon_with_retry() → POST http://127.0.0.1:8001/ask
-   { user, server_id, channel_name }
-
-4. HTTP daemon (http_server.py):
-   → brain.process(user_text, server_id, channel)
-
-5. Brain (brain_pipeline.py):
-   → tools.execute(user_text)
-   → "!task" matched → handle_task_tool()
-   → Spawns background thread, returns immediately:
-      "⚙️ Task started — streaming updates incoming..."
-
-6. HTTP daemon returns {"type": "tool", "content": "⚙️ Task started..."}
-
-7. Discord bot → channel.send("⚙️ Task started...")
-
-8. Background thread (coding_agent.py):
-   → _notify(server_id, "📋 Planning...") → POST /notify → push to queue
-   → route_task() → Qwen generates plan
-   → _notify(server_id, "✅ Plan ready")
-   → writes SPEC.md via VS Code bridge
-   → POST /copilot/task → VS Code opens
-
-9. notify_poller (asyncio task in core.py):
-   → every 2s: GET /notify?server_id=xxx
-   → pops queue → channel.send() for each message
-```
-
----
-
-## File Map
+### Normal Chat
 
 ```
-assistant/
-  brain.py              AssistantBrain — loads config, tools, pipeline
-  brain_pipeline.py     BrainPipeline — history, facts, memory, LLM, history save
-  http_server.py        HTTP daemon :8001 — /ask + /notify push + /notify poll
-  memory_loader.py      Loads memory/<id>.md into system prompt
-  audit_log.py          JSONL tool call audit log
-  summarizer.py         Gemma2 summarization for design output
-  task_router.py        Routes tasks to specialist models
+User: "jeeves what's the weather like?"
+  ↓
+Discord bot (on_message)
+  ↓ POST /ask { user, server_id, channel_name }
+Pi daemon (http_server.py)
+  ↓
+BrainPipeline.process()
+  ├── Tool layer check → no match
+  ├── Load conversation history (SQLite)
+  ├── Load persona + memory
+  └── Call Ollama qwen2.5:1.5b
+  ↓
+Response → Discord channel
+```
 
-tools/
-  assistant_tools.py    Main dispatcher — _TOOL_TABLE + NL triggers
-  coding_agent.py       Plan → SPEC.md → Copilot handoff + streaming
-  vscode/
-    vscode_tools.py     VSCodeBridge — HTTP client to PC bridge
-  calendar/
-    assistant_calendar.py   Google Calendar API
-    calendar_nlp.py         NL date parsing
-  email/
-    email_tools.py      IMAP read + SMTP send
-  design/
-    design_tools.py     UI/UX design system generator
-  sitekit/
-    sitekit_tools.py    SiteKit automation
-  cast/
-    chromecast_tools.py pychromecast wrapper
-  discord/
-    core.py             Client, on_message, notify_poller
-    daemon_client.py    HTTP client to :8001
-    routing.py          Channel checks, activation word, rate limit
-    message_utils.py    Output clamping for Discord limits
-    typing_indicator.py "Bot is typing..." while waiting
-    config_loader.py    Loads all server configs at startup
-    logging.py          Debug helpers
+### Tool Command
 
-core/
-  history.py            Per-server conversation history (JSON files)
-  personas.py           build_system_message()
-  facts.py              Fact file loader + keyword scorer
-  sanitize.py           LLM output cleaner
-  config.py             Server config loader
+```
+User: "jeeves !email unread"
+  ↓
+Discord bot → POST /ask
+  ↓
+BrainPipeline.process()
+  ↓
+ToolRegistry.execute(user_text, context, server_id)
+  ↓ prefix match "!email"
+handle_email_tool(text)
+  ↓
+Response → Discord channel (instant)
+```
 
-memory/
-  personal.example.md   Template — copy to YOUR_SERVER_ID.md
+### Task Command (streaming)
 
-config/
-  servers/              Per-server JSON configs
-  personas/             Persona text files
-  model_prefs.json      Default model settings
+```
+User: "jeeves !task build a pokemon game in pygame"
+  ↓
+Discord bot → POST /ask
+  ↓
+handle_task_tool(text, server_id="1034...")
+  ↓
+threading.Thread → run_coding_task()  ← returns immediately
+  ↓ "Task started — streaming updates incoming..."
+Discord bot receives response
+  ↓ creates Thread on that message ("🤖 Task in progress")
 
-tasks/
-  morning_briefing.py   Daily 8am briefing (add to cron to activate)
+[Background thread on Pi]:
+  _notify("🤖 Task: ...")           → queued in memory
+  _notify("📁 Project: ...")        → queued
+  _notify("🔍 Type: pygame_game")   → queued
+  _notify("📋 Planning with ...")   → queued
+  [gemma3:4b planning — 3-8 min]
+  _notify("⏳ Still planning (15s)") → every 15s heartbeat
+  ...
+  _notify("✅ Plan ready")
+  _notify("📝 Writing SPEC.md...")
+  POST /copilot/task → VS Code bridge
+  _notify("✅ SPEC.md written on PC")
+  _notify("🚀 VS Code opening...")
+  _notify("🏁 Jeeves done. Copilot is building...")
 
-logs/
-  tool_audit.jsonl      One JSON line per tool call
+[Discord bot notify poller — runs every 2s]:
+  GET /notify?server_id=1034...
+  ← {"messages": ["🤖 Task: ...", "📁 Project: ...", ...]}
+  → thread.send() for each message
+  → when "Jeeves done." detected → unregister thread
 ```
 
 ---
 
-## Streaming Architecture
+## Component Map
 
 ```
-┌─────────────────────────────────────┐
-│  coding_agent.py (background thread) │
-│  _notify(server_id, "📋 Planning")   │
-│    └─→ POST /notify                  │
-└──────────────────┬──────────────────┘
-                   ▼
-┌─────────────────────────────────────┐
-│  http_server.py                      │
-│  push_notify() → _notify_queues[]    │
-│    (in-memory deque, thread-safe)    │
-└──────────────────┬──────────────────┘
-                   ▼
-┌─────────────────────────────────────┐
-│  core.py — notify_poller()           │
-│  asyncio task, polls every 2s        │
-│  GET /notify?server_id=xxx           │
-│    → pop queue → channel.send()      │
-└─────────────────────────────────────┘
-```
-
-Polling (not SSE/WebSocket) is used because the daemon is synchronous stdlib HTTPServer while the Discord bot is asyncio. Polling is the simplest reliable bridge between the two.
-
----
-
-## Brain Pipeline
-
-```
-User message
-     │
-     ▼ Tool check (fast path — no LLM)
-     │ (if not a tool)
-     ▼
-load_history_with_token_budget()
-     ▼
-build_system_message()      ← persona file + channel tone
-     ▼
-get_relevant_facts()        ← keyword scoring (if enabled)
-     ▼
-memory_block(server_id)     ← reads memory/<id>.md
-     ▼
-Ollama POST /v1/chat/completions
-  model: qwen2.5:1.5b
-  max_tokens: 128 (short) | 250 (narrative)
-  timeout: 90s
-     ▼
-sanitize_output()
-     ▼
-save_history()
+/mnt/storage/pi-assistant/
+├── assistant/
+│   ├── http_server.py       ← HTTP daemon, notify queue, ThreadedHTTPServer
+│   ├── brain.py             ← AssistantBrain (assembles pipeline)
+│   ├── brain_core.py        ← AssistantBase, ToolRegistry, keepalive
+│   ├── brain_pipeline.py    ← process(), history, facts, LLM call
+│   ├── brain_db.py          ← all SQLite access (thread-safe WAL mode)
+│   ├── schema.sql           ← table definitions
+│   ├── supervisor.py        ← background loop: job queue + Architect/Coder/QA
+│   ├── indexer.py           ← project file indexer (AST + LLM summaries)
+│   ├── task_router.py       ← multi-model routing (core/coder/reasoner)
+│   └── audit_log.py         ← tool call log
+│
+├── tools/
+│   ├── assistant_tools.py   ← tool dispatcher (!task, !index, !email, etc.)
+│   ├── coding_agent.py      ← !task orchestration, SPEC.md builder
+│   ├── discord/
+│   │   ├── core.py          ← Discord client, notify poller, thread creation
+│   │   ├── routing.py       ← activation word, channel filtering, rate limiting
+│   │   ├── daemon_client.py ← async HTTP calls to /ask
+│   │   └── ...
+│   ├── vscode/
+│   │   └── vscode_tools.py  ← VS Code bridge client
+│   ├── calendar/            ← Google Calendar integration
+│   ├── email/               ← IMAP/SMTP
+│   ├── design/              ← UI/UX design system generator
+│   ├── cast/                ← Chromecast control
+│   └── sitekit/             ← business site kit generator
+│
+├── config/
+│   ├── config.json          ← global model + system config
+│   ├── servers/             ← per-server JSON configs
+│   ├── personas/            ← persona text files
+│   └── lore/                ← lore documents (for Scribe mode)
+│
+├── memory/                  ← per-server markdown memory files
+├── data/
+│   └── jeeves.db            ← SQLite database
+└── discord_modular.py       ← Discord bot entry point
 ```
 
 ---
 
-## Task Router
+## Database Schema
 
-```python
-route_task(prompt, task_type)
-  "reasoner" → qwen2.5:1.5b   (planning, architecture)
-  "coder"    → qwen2.5-coder:3b (code generation)
-  "core"     → qwen2.5:1.5b   (general)
-```
+### Core Tables
 
-Models load on-demand via Ollama. First call after idle may add 10-30s for model load; subsequent calls are fast.
+| Table | Purpose |
+|-------|---------|
+| `conversations` | Per-server chat history |
+| `projects` | Project registry |
+| `files` | Project file contents + snapshots |
+| `tasks` | Task queue (from Discord `!task`) |
+| `plans` | Architect-generated plans |
+| `subtasks` | Individual implementation steps |
+| `agent_runs` | Architect/Coder/QA execution log |
+| `memory_notes` | Persistent memory per server |
+| `tool_audit` | Every tool call logged |
+| `backlog_items` | QA-generated issue backlog |
+
+### Project Index Tables
+
+| Table | Purpose |
+|-------|---------|
+| `project_files` | Indexed file paths, language, summary, mtime |
+| `project_symbols` | Python classes and functions with line numbers |
+| `project_imports` | Import relationships between files |
+
+### Job Queue Tables
+
+| Table | Purpose |
+|-------|---------|
+| `jobs` | Background job queue (index_project, etc.) |
+| `job_runs` | Job execution history |
 
 ---
 
-## VS Code Bridge Protocol
+## Supervisor Loop
 
-Simple JSON over HTTP on port 5055. No authentication (LAN only — do not expose to internet).
+The supervisor runs as a daemon thread inside `pi-assistant.service`. Every 5 seconds:
+
+1. Check for pending **jobs** (indexing, maintenance) — process one
+2. If no jobs, check for pending **coding tasks** — run Architect → Coder → QA pipeline
+
+This means indexing runs in the background without blocking chat or task responses.
+
+---
+
+## Notify Queue (Streaming)
+
+The notify system is how long-running tasks stream progress to Discord without blocking:
 
 ```
-POST /write  { "path": "C:\\projects\\app\\main.py", "content": "..." }
-→ { "success": true, "message": "Written: ..." }
+coding_agent.py
+  → requests.post("http://127.0.0.1:8001/notify", {server_id, content})
+  → http_server.py appends to in-memory queue[server_id]
 
-POST /copilot/task  { "task": "...", "project_path": "C:\\projects\\app", "context": "..." }
-→ writes SPEC.md, opens VS Code, returns { "success": true }
+Discord bot (asyncio, every 2s)
+  → aiohttp.get("http://127.0.0.1:8001/notify?server_id=...")
+  → http_server.py pops and returns queue
+  → bot sends each message to the active task thread
 ```
 
-All error handling is done in `VSCodeBridge` (Python) and formatted for Discord output.
+Key properties:
+- `ThreadedHTTPServer` — `/notify` POST never blocks `/ask` processing
+- Session recreation on failure — poller survives connection drops
+- Thread auto-unregisters when `"Jeeves done."` is detected
+
+---
+
+## Multi-Model Routing
+
+`task_router.py` routes prompts to the right model:
+
+| Route | Model | Used For |
+|-------|-------|---------|
+| `core` | `qwen2.5:1.5b` | General chat, always warm |
+| `reasoner` | `gemma3:4b` | Task planning, structured output |
+| `coder` | `qwen2.5-coder:7b` | Code generation |
+| `summarizer` | `gemma2:2b` | File summaries, QA |
+
+---
+
+## Project Indexer
+
+`!index [path]` queues a background job. The supervisor runs it between tasks:
+
+1. Walk directory, skip `__pycache__`, `.git`, `venv`, `node_modules`
+2. Detect language from extension
+3. Extract Python symbols (classes, functions, imports) via AST — no LLM needed
+4. Optionally summarize each file with `qwen2.5:1.5b`
+5. Store in `project_files`, `project_symbols`, `project_imports`
+6. Incremental — skips files where `mtime` hasn't changed
+
+`!findfile` and `!findsymbol` query SQLite directly — instant results.

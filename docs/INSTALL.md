@@ -1,86 +1,48 @@
-# Jeeves — Installation Guide
-
-> Tested on: Raspberry Pi 5 (8GB), Ubuntu 24.04 LTS 64-bit  
-> Also works on: Raspberry Pi 4 (4GB+), Raspberry Pi OS Bookworm 64-bit
-
----
+# Installation Guide
 
 ## Prerequisites
 
-- Raspberry Pi 4 or 5 (4GB RAM minimum, 8GB recommended)
-- Ubuntu 24 or Raspberry Pi OS Bookworm — **64-bit only**
-- Internet connection for initial setup
-- A Discord account and a server you own/admin
-- (Optional) Windows or Linux PC on the same LAN for VS Code Bridge + Copilot
+- Raspberry Pi 5 (8GB recommended)
+- NVMe SSD mounted at `/mnt/storage` (or adjust paths)
+- Debian Trixie / Raspberry Pi OS Bookworm 64-bit
+- Python 3.11+
+- A Discord bot token
+- Ollama installed
 
 ---
 
-## Step 1 — System Dependencies
-
-```bash
-sudo apt update && sudo apt upgrade -y
-sudo apt install -y \
-  python3 python3-pip python3-venv python3-dev \
-  git curl wget \
-  build-essential \
-  libssl-dev libffi-dev \
-  ffmpeg nano
-```
-
----
-
-## Step 2 — Storage Setup (Recommended)
-
-NVMe SSD gives much better model load times. If using one, mount it:
-
-```bash
-sudo mkdir -p /mnt/storage
-lsblk                             # find your NVMe device name
-sudo mkfs.ext4 /dev/nvme0n1       # format (replace nvme0n1 with yours)
-sudo mount /dev/nvme0n1 /mnt/storage
-echo '/dev/nvme0n1 /mnt/storage ext4 defaults 0 2' | sudo tee -a /etc/fstab
-```
-
-If you skip this, the installer will fall back to `~/jeeves`.
-
----
-
-## Step 3 — Install Ollama
+## 1. Install Ollama
 
 ```bash
 curl -fsSL https://ollama.ai/install.sh | sh
-sudo systemctl enable ollama
-sudo systemctl start ollama
 ```
 
-Verify:
+Pull the required models:
+
 ```bash
-ollama --version
-curl http://127.0.0.1:11434/api/tags
+ollama pull qwen2.5:1.5b      # core chat — always warm
+ollama pull gemma3:4b          # task planning
+ollama pull qwen2.5-coder:7b   # code generation
+ollama pull gemma2:2b          # summarization / QA
 ```
 
----
-
-## Step 4 — Pull AI Models
+Keep models warm permanently:
 
 ```bash
-ollama pull qwen2.5:1.5b       # core model — required
-ollama pull gemma2:2b           # design summarizer — required
-ollama pull qwen2.5-coder:3b   # code generation — required for !task
-```
-
-This will take a few minutes depending on your connection. Verify:
-```bash
-ollama list
+sudo systemctl edit ollama
+# Add:
+# [Service]
+# Environment="OLLAMA_KEEP_ALIVE=-1"
+sudo systemctl restart ollama
 ```
 
 ---
 
-## Step 5 — Clone and Install Jeeves
+## 2. Clone and Set Up
 
 ```bash
-cd /mnt/storage    # or cd ~ if no NVMe
-git clone https://github.com/yourusername/jeeves.git pi-assistant
+cd /mnt/storage
+git clone https://github.com/GeneralMillz/pi-claw.git pi-assistant
 cd pi-assistant
 
 python3 -m venv venv
@@ -90,44 +52,31 @@ pip install -r requirements.txt
 
 ---
 
-## Step 6 — Create Your Environment File
+## 3. Configure Environment
 
 ```bash
 cp .env.example .env
 nano .env
 ```
 
-At minimum, fill in `DISCORD_TOKEN`. Everything else is optional depending on which tools you want.
+Fill in:
+
+```env
+DISCORD_TOKEN=your_bot_token_here
+GOOGLE_CREDENTIALS_PATH=/mnt/storage/pi-assistant/google_credentials.json
+```
 
 ---
 
-## Step 7 — Create a Discord Bot
+## 4. Configure Your Server
 
-1. Go to [discord.com/developers/applications](https://discord.com/developers/applications)
-2. **New Application** → give it a name (e.g. "Jeeves")
-3. Go to **Bot** tab → **Add Bot**
-4. Under **Privileged Gateway Intents**, enable:
-   - ✅ Message Content Intent
-   - ✅ Server Members Intent
-5. Copy the bot **Token** → paste into `.env` as `DISCORD_TOKEN`
-6. Go to **OAuth2 → URL Generator**:
-   - Scopes: `bot`
-   - Bot Permissions: `Send Messages`, `Read Message History`, `View Channels`
-7. Open the generated URL → invite the bot to your server
-
----
-
-## Step 8 — Configure Your Server
-
-Find your Discord server ID:  
-Discord → Settings → Advanced → enable **Developer Mode** → right-click your server → **Copy Server ID**
+Copy and edit the example server config:
 
 ```bash
-cp config/servers/example.json config/servers/YOUR_SERVER_ID.json
+cp example.json config/servers/YOUR_SERVER_ID.json
 nano config/servers/YOUR_SERVER_ID.json
 ```
 
-Minimal config to get started:
 ```json
 {
   "name": "my_server",
@@ -135,172 +84,168 @@ Minimal config to get started:
   "allowed_channels": ["jeeves"],
   "activation_word": "jeeves",
   "tools_enabled": true,
-  "persona_file": "default.txt",
-  "short_reply_mode": true
+  "persona_file": "config/personas/jeeves_founder.txt"
 }
 ```
 
-Create the channel in your Discord server:
-- Add a text channel named `jeeves` (or whatever you set in `allowed_channels`)
+Get your server ID: Discord → Server Settings → Widget → Server ID.
 
 ---
 
-## Step 9 — Add Your Memory File (Optional but Recommended)
+## 5. Set Up Systemd Services
+
+### Pi Assistant Daemon
 
 ```bash
-cp memory/personal.example.md memory/YOUR_SERVER_ID.md
-nano memory/YOUR_SERVER_ID.md
+sudo nano /etc/systemd/system/pi-assistant.service
 ```
 
-Then register it in `assistant/memory_loader.py`:
-```python
-_MEMORY_MAP = {
-    "YOUR_SERVER_ID": "YOUR_SERVER_ID",
-}
+```ini
+[Unit]
+Description=Jerry's Pi Assistant (Local LLM)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/mnt/storage/pi-assistant
+ExecStart=/mnt/storage/pi-assistant/venv/bin/python3 -m assistant.http_server
+Restart=always
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/mnt/storage/pi-assistant/venv/bin:/usr/local/bin:/usr/bin:/bin
+Environment=VIRTUAL_ENV=/mnt/storage/pi-assistant/venv
+Environment=HOME=/home/pi
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
 ```
 
-This file gets injected into every AI prompt — add anything you want the assistant to always know about you.
-
----
-
-## Step 10 — Google Calendar (Optional)
-
-1. [console.cloud.google.com](https://console.cloud.google.com) → New Project
-2. Enable **Google Calendar API**
-3. Create **OAuth 2.0 credentials** (Desktop app type)
-4. Download `credentials.json` → save to `config/google_credentials.json`
-5. Authorize:
-```bash
-source venv/bin/activate
-python3 tools/calendar/auth.py
-```
-Follow the browser prompt. This creates `config/google_token.json`.
-
----
-
-## Step 11 — Install Systemd Services
+### Discord Bot
 
 ```bash
-# Edit the service files to match your username and path
-nano systemd/pi-assistant.service.template
-nano systemd/pi-discord-bot.service.template
+sudo nano /etc/systemd/system/pi-discord-bot.service
+```
 
-# Install
-sudo cp systemd/pi-assistant.service.template /etc/systemd/system/pi-assistant.service
-sudo cp systemd/pi-discord-bot.service.template /etc/systemd/system/pi-discord-bot.service
+```ini
+[Unit]
+Description=Pi Assistant Discord Bot
+After=network-online.target
+Wants=network-online.target
 
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/mnt/storage/pi-assistant
+ExecStart=/mnt/storage/pi-assistant/venv/bin/python3 /mnt/storage/pi-assistant/discord_modular.py
+Restart=on-failure
+RestartSec=30
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/mnt/storage/pi-assistant/.env
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Enable and start:
+
+```bash
 sudo systemctl daemon-reload
-sudo systemctl enable pi-assistant.service pi-discord-bot.service
-sudo systemctl start pi-assistant.service pi-discord-bot.service
+sudo systemctl enable pi-assistant pi-discord-bot
+sudo systemctl start pi-assistant
+sleep 30   # wait for model warmup
+sudo systemctl start pi-discord-bot
 ```
 
-Check status:
+---
+
+## 6. Initialize the Database
+
+The database initializes automatically on first start. Verify it was created:
+
 ```bash
-sudo systemctl status pi-assistant.service
-sudo systemctl status pi-discord-bot.service
+sqlite3 /mnt/storage/pi-assistant/data/jeeves.db ".tables"
 ```
 
-Watch logs:
+You should see: `conversations`, `projects`, `files`, `tasks`, `jobs`, `project_files`, `project_symbols`, etc.
+
+Run the project index migration if needed:
+
 ```bash
-sudo journalctl -u pi-assistant -f
+sqlite3 /mnt/storage/pi-assistant/data/jeeves.db < assistant/003_project_index.sql
+```
+
+---
+
+## 7. Set Up VS Code Bridge (PC Side)
+
+See **[COPILOT.md](COPILOT.md)** for full instructions.
+
+Short version:
+
+```powershell
+# On your PC
+cd G:\Jeeves\vscode-bridge
+npm install
+node server.js   # keep this running
+```
+
+Install the VS Code extension:
+
+```powershell
+cp extension.js "$env:USERPROFILE\.vscode\extensions\jeeves-copilot-bridge\extension.js" -Force
+```
+
+Reload VS Code: `Ctrl+Shift+P` → `Developer: Reload Window`
+
+---
+
+## 8. Test It
+
+```bash
+# Check daemon is up
+curl http://localhost:8001/ask -d '{"user":"ping","server_id":"test","channel_name":"test"}'
+
+# Check Discord bot
 sudo journalctl -u pi-discord-bot -f
 ```
 
----
-
-## Step 12 — Test It
-
-```bash
-# Test the daemon directly
-curl -s -X POST http://127.0.0.1:8001/ask \
-  -H "Content-Type: application/json" \
-  -d '{"user": "hi", "server_id": "YOUR_SERVER_ID", "channel_name": "jeeves"}'
+In Discord:
 ```
-
-Should return `{"type": "chat", "content": "Hello! ..."}` within a few seconds.
-
-Then say `jeeves hi` in your Discord channel.
-
----
-
-## Step 13 — VS Code Bridge (Optional — Windows PC)
-
-Required for `!vscode` commands and Copilot orchestration.
-
-On your **Windows PC**:
-
-```powershell
-# Node.js required — download from nodejs.org if needed
-node --version
-
-# Copy the bridge files to your PC
-# (download vscode-bridge/ folder from this repo)
-cd C:\wherever\you\put\it\vscode-bridge
-npm install
-
-# Allow port 5055 through Windows Firewall
-netsh advfirewall firewall add rule name="Jeeves Bridge" dir=in action=allow protocol=TCP localport=5055
-
-# Start the bridge
-node server.js
-```
-
-Update your Pi config with your PC's LAN IP:
-```bash
-# In tools/vscode/vscode_tools.py
-_DEFAULT_HOST = "http://YOUR_PC_LAN_IP:5055"
-
-# In tools/coding_agent.py
-VSCODE_HOST = "http://YOUR_PC_LAN_IP:5055"
-```
-
-Test from Pi:
-```bash
-curl -s http://YOUR_PC_LAN_IP:5055/ping
-```
-
-**Auto-start on Windows login (PowerShell as Admin):**
-```powershell
-$action  = New-ScheduledTaskAction -Execute "node" -Argument "C:\path\to\vscode-bridge\server.js" -WorkingDirectory "C:\path\to\vscode-bridge"
-$trigger = New-ScheduledTaskTrigger -AtLogon
-Register-ScheduledTask -TaskName "Jeeves Bridge" -Action $action -Trigger $trigger -RunLevel Highest
-```
-
----
-
-## Morning Briefing (Optional)
-
-Posts a daily summary to Discord at 8am:
-
-```bash
-crontab -e
-# Add:
-0 8 * * * /mnt/storage/pi-assistant/venv/bin/python3 /mnt/storage/pi-assistant/tasks/morning_briefing.py >> /var/log/jeeves-briefing.log 2>&1
+jeeves !ping
+jeeves hello
+jeeves !task build a snake game in pygame
 ```
 
 ---
 
 ## Troubleshooting
 
-| Problem | Fix |
-|---------|-----|
-| Bot doesn't respond | Check `allowed_channels` in server config matches your channel name |
-| `DISCORD_TOKEN not set` | Check `.env` is in project root and token is correct |
-| Slow responses (30-40s) | Check `fact_path` in server config — remove if pointing at wrong directory |
-| Ollama not responding | `sudo systemctl restart ollama` |
-| Model not found | `ollama pull qwen2.5:1.5b` |
-| VS Code bridge timeout | Check firewall rule, confirm `node server.js` is running on PC |
-| BrokenPipeError in logs | Harmless — notify poller disconnects between polls, safely ignored |
-
----
-
-## Updating
-
+**Bot restarts every 2 minutes:**
 ```bash
-cd /path/to/pi-assistant
-git pull
-source venv/bin/activate
-pip install -r requirements.txt
-sudo systemctl restart pi-assistant.service
-sudo systemctl restart pi-discord-bot.service
+grep "Restart" /etc/systemd/system/pi-discord-bot.service
+# Should be: Restart=on-failure (NOT Restart=always)
+```
+
+**Streaming updates not appearing in Discord:**
+```bash
+sudo journalctl -u pi-assistant --since "5 min ago" | grep NOTIFY
+# Should show 200 responses
+```
+
+**Model timing out:**
+```bash
+ollama list   # verify models are present
+ollama run qwen2.5:1.5b "ping"   # test manually
+```
+
+**Database errors:**
+```bash
+sqlite3 /mnt/storage/pi-assistant/data/jeeves.db ".schema" | head -20
+# Re-run migrations if tables are missing
 ```

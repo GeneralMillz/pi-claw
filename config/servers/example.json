@@ -1,12 +1,10 @@
 {
-  "_comment": "Rename this file to YOUR_DISCORD_SERVER_ID.json",
   "name": "my_server",
   "mode": "founder",
   "allowed_channels": ["jeeves"],
   "activation_word": "jeeves",
   "tools_enabled": true,
-  "persona_file": "default.txt",
-  "short_reply_mode": true,
+  "persona_file": "config/personas/jeeves_founder.txt",
   "channel_overrides": {
     "dev": { "tools_enabled": true, "tone": "analytical" },
     "ops": { "tools_enabled": true, "tone": "operational" }

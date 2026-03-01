@@ -1,201 +1,203 @@
 #!/usr/bin/env bash
 # ============================================================
-# Jeeves Installer
-# Raspberry Pi 5 / Ubuntu 24 / Raspberry Pi OS Bookworm 64-bit
+# Jeeves — Pi Assistant Installer
+# Tested on: Debian Trixie, Raspberry Pi OS Bookworm 64-bit
+# Hardware:   Raspberry Pi 5 (8GB), NVMe SSD
 # ============================================================
 set -e
 
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
-info()    { echo -e "${BLUE}[INFO]${NC} $1"; }
-success() { echo -e "${GREEN}[OK]${NC}   $1"; }
+INSTALL_DIR="/mnt/storage/pi-assistant"
+VENV="$INSTALL_DIR/venv"
+SERVICE_USER="${SUDO_USER:-pi}"
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+info()    { echo -e "${CYAN}[INFO]${NC} $1"; }
+success() { echo -e "${GREEN}[OK]${NC} $1"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error()   { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 
 echo ""
-echo "  ╔══════════════════════════════════╗"
-echo "  ║        🤵 Jeeves Installer        ║"
-echo "  ╚══════════════════════════════════╝"
+echo "  🤵 Jeeves Pi Assistant Installer"
+echo "  ================================"
 echo ""
 
-# ── Root check ────────────────────────────────────────────────────────────────
-[ "$EUID" -eq 0 ] && error "Do not run as root. Run as your normal user."
-
-# ── Detect install path ───────────────────────────────────────────────────────
-if mountpoint -q /mnt/storage 2>/dev/null; then
-  JEEVES_DIR="/mnt/storage/pi-assistant"
-  info "NVMe detected — installing to /mnt/storage/pi-assistant"
-else
-  JEEVES_DIR="$HOME/pi-assistant"
-  warn "No NVMe at /mnt/storage — installing to $HOME/pi-assistant"
+# ── Check root ────────────────────────────────────────────────────────────────
+if [ "$EUID" -ne 0 ]; then
+    error "Run as root: sudo ./install.sh"
 fi
-VENV="$JEEVES_DIR/venv"
 
-# ── OS detection ──────────────────────────────────────────────────────────────
-[ -f /etc/os-release ] && . /etc/os-release && info "OS: $PRETTY_NAME"
-ARCH=$(uname -m)
-info "Architecture: $ARCH"
-[[ "$ARCH" != "aarch64" && "$ARCH" != "x86_64" ]] && warn "Unexpected arch: $ARCH"
+# ── Check Pi 5 ────────────────────────────────────────────────────────────────
+if grep -q "Raspberry Pi 5" /proc/cpuinfo 2>/dev/null; then
+    success "Raspberry Pi 5 detected"
+else
+    warn "Not a Pi 5 — install will continue but performance may differ"
+fi
 
-# ── System packages ───────────────────────────────────────────────────────────
+# ── Install system packages ───────────────────────────────────────────────────
 info "Installing system packages..."
-sudo apt update -qq
-sudo apt install -y \
-  python3 python3-pip python3-venv python3-dev \
-  git curl wget build-essential \
-  libssl-dev libffi-dev ffmpeg nano \
-  2>/dev/null
-success "System packages installed."
+apt-get update -qq
+apt-get install -y -qq python3 python3-pip python3-venv git sqlite3 curl
 
-# ── Python version ────────────────────────────────────────────────────────────
-PY_VER=$(python3 --version 2>&1 | awk '{print $2}')
-PY_MINOR=$(echo "$PY_VER" | cut -d. -f2)
-info "Python $PY_VER"
-[ "$PY_MINOR" -lt 11 ] && error "Python 3.11+ required. Got $PY_VER"
-success "Python $PY_VER OK."
-
-# ── Ollama ────────────────────────────────────────────────────────────────────
+# ── Install Ollama ────────────────────────────────────────────────────────────
 if command -v ollama &>/dev/null; then
-  success "Ollama already installed."
+    success "Ollama already installed"
 else
-  info "Installing Ollama..."
-  curl -fsSL https://ollama.ai/install.sh | sh
-  success "Ollama installed."
+    info "Installing Ollama..."
+    curl -fsSL https://ollama.ai/install.sh | sh
+    success "Ollama installed"
 fi
 
-sudo systemctl enable ollama 2>/dev/null || true
-sudo systemctl start ollama 2>/dev/null || true
+# ── Create install directory ──────────────────────────────────────────────────
+info "Setting up $INSTALL_DIR..."
+mkdir -p "$INSTALL_DIR"
+mkdir -p "$INSTALL_DIR/data"
+mkdir -p "$INSTALL_DIR/config/servers"
+mkdir -p "$INSTALL_DIR/config/personas"
+mkdir -p "$INSTALL_DIR/config/history"
+mkdir -p "$INSTALL_DIR/config/lore"
+mkdir -p "$INSTALL_DIR/memory"
+mkdir -p "$INSTALL_DIR/logs"
 
-info "Waiting for Ollama to start..."
-for i in {1..10}; do
-  curl -s http://127.0.0.1:11434/api/tags >/dev/null 2>&1 && break
-  sleep 2
-done
-
-curl -s http://127.0.0.1:11434/api/tags >/dev/null 2>&1 && success "Ollama running." || error "Ollama failed to start. Try: sudo systemctl status ollama"
-
-# ── AI Models ─────────────────────────────────────────────────────────────────
-info "Pulling AI models (this may take several minutes on first run)..."
-
-pull_model() {
-  info "Pulling $1..."
-  ollama pull "$1" && success "$1 ready." || warn "Could not pull $1 — run manually: ollama pull $1"
-}
-
-pull_model "qwen2.5:1.5b"
-pull_model "gemma2:2b"
-pull_model "qwen2.5-coder:3b"
-
-# ── Clone / update repo ───────────────────────────────────────────────────────
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-
-if [ "$SCRIPT_DIR" = "$JEEVES_DIR" ]; then
-  info "Already in install directory — skipping clone."
-else
-  if [ -d "$JEEVES_DIR/.git" ]; then
-    info "Jeeves already installed — pulling latest..."
-    cd "$JEEVES_DIR" && git pull
-  else
-    info "Installing Jeeves to $JEEVES_DIR..."
-    sudo mkdir -p "$JEEVES_DIR"
-    sudo chown "$USER:$USER" "$JEEVES_DIR"
-    cp -r "$SCRIPT_DIR/." "$JEEVES_DIR/"
-  fi
+# Copy files if running from repo
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$SCRIPT_DIR/requirements.txt" ]; then
+    info "Copying files from repo..."
+    cp -r "$SCRIPT_DIR"/* "$INSTALL_DIR/" 2>/dev/null || true
 fi
 
-cd "$JEEVES_DIR"
-
-# ── Python venv ───────────────────────────────────────────────────────────────
+# ── Set up Python venv ────────────────────────────────────────────────────────
 info "Creating Python virtual environment..."
 python3 -m venv "$VENV"
-source "$VENV/bin/activate"
-pip install --upgrade pip -q
-pip install -r requirements.txt -q
-success "Python environment ready."
+"$VENV/bin/pip" install --upgrade pip -q
+"$VENV/bin/pip" install -r "$INSTALL_DIR/requirements.txt" -q
+success "Python environment ready"
 
-# ── Directories ───────────────────────────────────────────────────────────────
-mkdir -p "$JEEVES_DIR/logs"
-mkdir -p "$JEEVES_DIR/memory"
-mkdir -p "$JEEVES_DIR/config/servers"
-mkdir -p "$JEEVES_DIR/config/personas"
-success "Directories created."
+# ── Pull Ollama models ────────────────────────────────────────────────────────
+info "Pulling Ollama models (this will take a while)..."
+echo "  → qwen2.5:1.5b  (core chat, 1.1GB)"
+ollama pull qwen2.5:1.5b
+echo "  → gemma3:4b     (task planning, 3.3GB)"
+ollama pull gemma3:4b
+echo "  → gemma2:2b     (summarization, 1.6GB)"
+ollama pull gemma2:2b
+echo ""
+warn "Optional: Pull larger models for better code generation"
+warn "  ollama pull qwen2.5-coder:7b   (4.7GB)"
+warn "  ollama pull qwen2.5-coder:3b   (1.9GB, faster)"
+echo ""
 
-# ── .env ──────────────────────────────────────────────────────────────────────
-if [ ! -f "$JEEVES_DIR/.env" ]; then
-  cp "$JEEVES_DIR/.env.example" "$JEEVES_DIR/.env"
-  warn ".env created — you must edit it before starting: nano $JEEVES_DIR/.env"
-else
-  info ".env already exists."
+# ── Configure .env ────────────────────────────────────────────────────────────
+if [ ! -f "$INSTALL_DIR/.env" ]; then
+    info "Creating .env from example..."
+    cp "$INSTALL_DIR/.env.example" "$INSTALL_DIR/.env"
+    warn "Edit $INSTALL_DIR/.env and add your DISCORD_TOKEN"
 fi
 
-# ── Memory file ───────────────────────────────────────────────────────────────
-if [ ! -f "$JEEVES_DIR/memory/personal.example.md" ]; then
-  warn "memory/personal.example.md not found — skipping."
+# ── Create default server config ─────────────────────────────────────────────
+if [ ! "$(ls -A $INSTALL_DIR/config/servers/ 2>/dev/null)" ]; then
+    info "Creating example server config..."
+    cat > "$INSTALL_DIR/config/servers/YOUR_SERVER_ID.json" << 'EOF'
+{
+  "name": "my_server",
+  "mode": "founder",
+  "allowed_channels": ["jeeves"],
+  "activation_word": "jeeves",
+  "tools_enabled": true,
+  "persona_file": "config/personas/jeeves_founder.txt"
+}
+EOF
+    warn "Rename config/servers/YOUR_SERVER_ID.json to your actual Discord server ID"
 fi
 
-# ── Systemd services ──────────────────────────────────────────────────────────
+# ── Install systemd services ──────────────────────────────────────────────────
 info "Installing systemd services..."
 
-install_service() {
-  TEMPLATE="$JEEVES_DIR/systemd/$1.template"
-  TARGET="/etc/systemd/system/$1"
-  if [ -f "$TEMPLATE" ]; then
-    sed "s|JEEVES_DIR|$JEEVES_DIR|g; s|VENV_DIR|$VENV|g; s|SERVICE_USER|$USER|g" \
-      "$TEMPLATE" | sudo tee "$TARGET" >/dev/null
-    success "$1 installed."
-  else
-    warn "Template $TEMPLATE not found — service not installed."
-  fi
-}
+cat > /etc/systemd/system/pi-assistant.service << EOF
+[Unit]
+Description=Jerry's Pi Assistant (Local LLM)
+After=network-online.target
+Wants=network-online.target
 
-install_service "pi-assistant.service"
-install_service "pi-discord-bot.service"
+[Service]
+Type=simple
+User=$SERVICE_USER
+WorkingDirectory=$INSTALL_DIR
+ExecStart=$VENV/bin/python3 -m assistant.http_server
+Restart=always
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=$VENV/bin:/usr/local/bin:/usr/bin:/bin
+Environment=VIRTUAL_ENV=$VENV
+Environment=HOME=/home/$SERVICE_USER
+StandardOutput=journal
+StandardError=journal
 
-sudo systemctl daemon-reload
-sudo systemctl enable pi-assistant.service pi-discord-bot.service 2>/dev/null || true
+[Install]
+WantedBy=multi-user.target
+EOF
 
-# ── Health check ──────────────────────────────────────────────────────────────
-echo ""
-info "Running health check..."
-HEALTH_OK=true
+cat > /etc/systemd/system/pi-discord-bot.service << EOF
+[Unit]
+Description=Pi Assistant Discord Bot
+After=network-online.target pi-assistant.service
+Wants=network-online.target
 
-curl -s http://127.0.0.1:11434/api/tags >/dev/null 2>&1 \
-  && success "✓ Ollama running" || { warn "✗ Ollama not responding"; HEALTH_OK=false; }
+[Service]
+Type=simple
+User=$SERVICE_USER
+WorkingDirectory=$INSTALL_DIR
+ExecStart=$VENV/bin/python3 $INSTALL_DIR/discord_modular.py
+Restart=on-failure
+RestartSec=30
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=$INSTALL_DIR/.env
+StandardOutput=journal
+StandardError=journal
 
-ollama list 2>/dev/null | grep -q "qwen2.5:1.5b" \
-  && success "✓ qwen2.5:1.5b ready" || { warn "✗ qwen2.5:1.5b missing"; HEALTH_OK=false; }
+[Install]
+WantedBy=multi-user.target
+EOF
 
-grep -q "your_discord_bot_token_here" "$JEEVES_DIR/.env" 2>/dev/null \
-  && { warn "✗ .env not configured"; HEALTH_OK=false; } || success "✓ .env configured"
+systemctl daemon-reload
+systemctl enable pi-assistant pi-discord-bot
+success "Systemd services installed"
+
+# ── Fix permissions ───────────────────────────────────────────────────────────
+chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 echo ""
-echo "  ╔══════════════════════════════════════════════╗"
-[ "$HEALTH_OK" = true ] \
-  && echo "  ║   ✅ Jeeves installed successfully!           ║" \
-  || echo "  ║   ⚠️  Jeeves installed with warnings           ║"
-echo "  ╚══════════════════════════════════════════════╝"
+echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${GREEN}  ✅ Jeeves installation complete!${NC}"
+echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
 echo "  Next steps:"
 echo ""
-echo "  1. Edit .env with your Discord token:"
-echo "     nano $JEEVES_DIR/.env"
+echo "  1. Add your Discord token:"
+echo "     nano $INSTALL_DIR/.env"
 echo ""
 echo "  2. Create your server config:"
-echo "     cp $JEEVES_DIR/config/servers/example.json \\"
-echo "        $JEEVES_DIR/config/servers/YOUR_SERVER_ID.json"
-echo "     nano $JEEVES_DIR/config/servers/YOUR_SERVER_ID.json"
+echo "     cp $INSTALL_DIR/config/servers/YOUR_SERVER_ID.json \\"
+echo "        $INSTALL_DIR/config/servers/<your_discord_server_id>.json"
+echo "     nano $INSTALL_DIR/config/servers/<your_discord_server_id>.json"
 echo ""
-echo "  3. Create your memory file (optional but recommended):"
-echo "     cp $JEEVES_DIR/memory/personal.example.md \\"
-echo "        $JEEVES_DIR/memory/YOUR_SERVER_ID.md"
-echo "     nano $JEEVES_DIR/memory/YOUR_SERVER_ID.md"
+echo "  3. Start the services:"
+echo "     sudo systemctl start pi-assistant"
+echo "     sleep 30"
+echo "     sudo systemctl start pi-discord-bot"
 echo ""
-echo "  4. Start Jeeves:"
-echo "     sudo systemctl start pi-assistant.service"
-echo "     sudo systemctl start pi-discord-bot.service"
-echo ""
-echo "  5. Watch logs:"
+echo "  4. Check logs:"
 echo "     sudo journalctl -u pi-assistant -f"
+echo "     sudo journalctl -u pi-discord-bot -f"
 echo ""
-echo "  Full guide: docs/INSTALL.md"
+echo "  5. Test in Discord:"
+echo "     jeeves hello"
+echo "     jeeves !task build a snake game in pygame"
+echo ""
+echo "  Full docs: docs/INSTALL.md"
 echo ""

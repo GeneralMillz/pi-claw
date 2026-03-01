@@ -1,12 +1,43 @@
-# Jeeves — Configuration Guide
+# Configuration Guide
+
+## Global Config (`config.json`)
+
+Located at `/mnt/storage/pi-assistant/config.json`
+
+```json
+{
+  "model": "qwen2.5:1.5b",
+  "system": "You are Jeeves, a personal AI assistant running on a Raspberry Pi 5...",
+  "max_history": 6,
+  "context_tokens": 4096,
+  "keepalive_enabled": true,
+  "keepalive_interval": 600,
+  "model_prefs": {
+    "qwen2.5:1.5b": {
+      "max_history": 6,
+      "context_tokens": 4096,
+      "facts_enabled": false,
+      "identity_override": true,
+      "short_reply_mode": true
+    }
+  }
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `model` | Default chat model (always-warm model) |
+| `max_history` | Number of past messages to include in context |
+| `context_tokens` | Token budget for conversation history |
+| `keepalive_interval` | Seconds between keepalive pings to Ollama (prevents model unload) |
+| `identity_override` | Use persona file instead of model's default identity |
+| `short_reply_mode` | Append "be brief" instructions to system prompt |
 
 ---
 
-## Server Config
+## Server Config (`config/servers/<server_id>.json`)
 
-Each Discord server gets its own JSON file at `config/servers/<server_id>.json`.
-
-Get your server ID: Discord → Settings → Advanced → enable **Developer Mode** → right-click server → **Copy Server ID**
+One file per Discord server. Filename is the Discord guild ID.
 
 ```json
 {
@@ -15,196 +46,189 @@ Get your server ID: Discord → Settings → Advanced → enable **Developer Mod
   "allowed_channels": ["jeeves"],
   "activation_word": "jeeves",
   "tools_enabled": true,
-  "persona_file": "default.txt",
-  "short_reply_mode": true,
+  "persona_file": "config/personas/jeeves_founder.txt",
   "channel_overrides": {
-    "dev": { "tools_enabled": true, "tone": "analytical" }
+    "dev": { "tools_enabled": true, "tone": "analytical" },
+    "ops": { "tools_enabled": true, "tone": "operational" }
   }
 }
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `name` | string | Human-readable label (used in logs only) |
-| `mode` | string | Persona mode — matches a persona file |
-| `allowed_channels` | array | Only respond in these Discord channels |
-| `activation_word` | string | Word that triggers the assistant |
-| `tools_enabled` | bool | Allow `!` tool commands in this server |
-| `persona_file` | string | Text file in `config/personas/` |
-| `short_reply_mode` | bool | `true` = 128 token replies, `false` = 250 token narrative |
-| `facts_enabled` | bool | Enable keyword-scored fact injection (optional) |
-| `fact_path` | string | Path to JSONL fact files (optional — omit if unused) |
-| `channel_overrides` | object | Per-channel config overrides |
+| Field | Description |
+|-------|-------------|
+| `name` | Human-readable server name |
+| `mode` | `founder`, `family`, `lore` — affects persona defaults |
+| `allowed_channels` | Bot only responds in these channels |
+| `activation_word` | Trigger word (e.g. "jeeves", "atlas") |
+| `tools_enabled` | Whether `!task`, `!email`, etc. are available |
+| `persona_file` | Path to persona text file |
+| `channel_overrides` | Per-channel config overrides |
 
 ---
 
-## Renaming the Assistant
+## Personas (`config/personas/`)
 
-Change `activation_word` to anything you like:
+Plain text files. Injected as the system prompt.
 
+**jeeves_founder.txt** — Default persona. Technical, precise, brief.
+
+```
+You are Jeeves, Jerry's personal AI assistant running locally on a Raspberry Pi 5.
+You think like a systems architect and communicate like a senior engineer.
+You never guess. You verify, confirm, and execute with discipline.
+
+## Code Navigation Protocol
+Before writing or editing any code:
+1. Use !findfile or !findsymbol to locate the exact file.
+2. Use !vscode read <path> to understand the existing implementation.
+3. Patch minimally. Never rewrite a file to fix one line.
+```
+
+**jeeves_family.txt** — Casual, warm tone for family server.
+
+**scribe_lore.txt** — Lore archivist persona. Stays in-world, only references the lore document.
+
+### Creating a Custom Persona
+
+```bash
+nano config/personas/atlas.txt
+```
+
+```
+You are Atlas, a no-nonsense engineering AI...
+```
+
+Reference it in the server config:
 ```json
 {
-  "activation_word": "friday",
-  "persona_file": "friday.txt"
+  "activation_word": "atlas",
+  "persona_file": "config/personas/atlas.txt"
 }
 ```
 
-Create `config/personas/friday.txt`:
+---
+
+## Memory (`memory/`)
+
+Per-server markdown files. Injected into every prompt for that server.
+
 ```
-You are Friday, a sharp and efficient AI assistant.
-...
+memory/
+  personal.md          ← injected for server 1034... (founder server)
+  family.md            ← injected for family server
 ```
 
-Done — the bot now responds to "friday" instead of "jeeves".
+Format is freeform markdown. Jeeves reads it as context:
+
+```markdown
+# About Jerry
+
+- Software developer, Raspberry Pi enthusiast
+- Main projects: Jeeves, pi-media-server, game dev hobby projects
+- Preferred stack: Python, FastAPI, React
+- PC: Windows 11, VS Code, GitHub Copilot
+```
 
 ---
 
-## Per-Server Memory
+## Multi-Model Routing (`task_router.py`)
 
-Each server can have a persistent markdown file injected into every system prompt.
-
-**Setup:**
-
-1. Create `memory/YOUR_SERVER_ID.md` (copy from `memory/personal.example.md`)
-2. Register it in `assistant/memory_loader.py`:
+Controls which Ollama model handles each type of request:
 
 ```python
-_MEMORY_MAP = {
-    "123456789012345678": "123456789012345678",  # maps server_id → filename (without .md)
+MODELS = {
+    "core":       "qwen2.5:1.5b",    # always warm — general chat
+    "reasoner":   "gemma3:4b",        # task planning, structured output
+    "coder":      "qwen2.5-coder:7b", # code generation
+    "summarizer": "gemma2:2b",        # file summaries, QA
 }
 ```
 
-**Format:**
-```markdown
-# Lines starting with # are stripped before injection
-
-## About Me
-- Name: Alex
-- Role: Freelance developer
-
-## Current Projects
-- Project Falcon — React dashboard for client XYZ
-
-## Preferences
-- Keep responses brief
-- I prefer bullet points
-```
-
-Edit anytime — no restart needed. The file is read fresh on every request.
+To swap a model, edit this dict. No restart required (`.pyc` cache clears automatically on next invocation if you delete it).
 
 ---
 
-## Persona Files
+## Task Planning Models
 
-Located at `config/personas/<filename>.txt`. Referenced in server config.
+The `!task` command uses the `reasoner` model. To change it:
 
-**Default persona (`config/personas/default.txt`):**
+```bash
+python3 << 'EOF'
+path = "/mnt/storage/pi-assistant/assistant/task_router.py"
+with open(path) as f: content = f.read()
+content = content.replace('"reasoner":   "gemma3:4b"', '"reasoner":   "mistral:7b"')
+with open(path, "w") as f: f.write(content)
+print("done")
+EOF
 ```
-You are Jeeves, a highly capable personal AI assistant.
-You are direct, efficient, and technically sharp.
-You keep responses concise and actionable.
-```
 
-Create as many as you need — one per server or mode.
+Recommended models for reasoning on Pi 5:
+
+| Model | Size | Speed | Quality |
+|-------|------|-------|---------|
+| `gemma3:4b` | 3.3GB | ~3-5 min | ⭐⭐⭐⭐ |
+| `qwen2.5:7b` | 4.7GB | ~7-8 min | ⭐⭐⭐⭐ |
+| `mistral:7b` | 4.4GB | ~5-6 min | ⭐⭐⭐⭐ |
+| `deepseek-r1:8b` | 5.2GB | slow + verbose | ⭐⭐⭐ |
 
 ---
 
-## Model Configuration
+## Project Indexer
 
-`config/model_prefs.json`:
+The indexer runs as a background job. Configure what gets indexed by adjusting `SKIP_DIRS` in `indexer.py`:
 
-```json
-{
-  "model": "qwen2.5:1.5b",
-  "context_tokens": 4096,
-  "max_history": 6,
-  "short_reply_mode": true,
-  "facts_enabled": false
+```python
+SKIP_DIRS = {
+    "__pycache__", ".git", "node_modules", "venv", ".venv",
+    "dist", "build", ".mypy_cache", ".pytest_cache",
 }
 ```
 
-Server config `short_reply_mode` always overrides this file.
+Max file size (default 50KB — skips binaries):
+```python
+MAX_FILE_BYTES = 50_000
+```
 
-**Model-aware history caps (automatic):**
-- `qwen2.5:0.5b` → max 2 history messages
-- `qwen2.5:1.5b` → max 6 history messages
-- Larger models → max 8 history messages
+Run without LLM summaries (fast):
+```
+jeeves !index --no-summarize
+```
+
+Force re-index all files (ignore mtime):
+```
+jeeves !index --force
+```
+
+---
+
+## Environment Variables (`.env`)
+
+```env
+DISCORD_TOKEN=your_bot_token
+
+# Google Calendar (optional)
+GOOGLE_CREDENTIALS_PATH=/mnt/storage/pi-assistant/google_credentials.json
+
+# Email (optional)
+IMAP_HOST=imap.gmail.com
+IMAP_PORT=993
+IMAP_USER=you@gmail.com
+IMAP_PASS=your_app_password
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+```
 
 ---
 
 ## VS Code Bridge
 
-Update your PC's LAN IP in two places:
+Update the bridge host in `coding_agent.py` to match your PC's local IP:
 
-`tools/vscode/vscode_tools.py`:
 ```python
-_DEFAULT_HOST = "http://192.168.1.x:5055"
+VSCODE_HOST = "http://192.168.1.153:5055"
 ```
 
-`tools/coding_agent.py`:
-```python
-VSCODE_HOST = "http://192.168.1.x:5055"
-```
-
-Find your PC's IP: `ipconfig` (Windows) or `ip addr` (Linux)
-
----
-
-## Chromecast (Optional)
-
-`tools/cast/chromecast_tools.py`:
-```python
-DEVICES = {
-    "tv":      "Your TV Device Name",
-    "speaker": "Your Speaker Name",
-}
-```
-
-Find device names:
-```bash
-source venv/bin/activate
-python3 -c "import pychromecast; cc, _ = pychromecast.get_chromecasts(); [print(c.name) for c in cc]"
-```
-
-> **Note:** Chromecast Ultra (Cast OS) supports volume/mute only. Full playback control requires a Chromecast with Google TV device.
-
----
-
-## Email (Optional)
-
-`.env`:
-```env
-EMAIL_ADDRESS=you@gmail.com
-EMAIL_PASSWORD=your_app_password   # Gmail: use App Password, not your real password
-IMAP_SERVER=imap.gmail.com
-SMTP_SERVER=smtp.gmail.com
-SMTP_PORT=587
-```
-
-For Gmail App Passwords: [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords)
-
----
-
-## Fact Files (Optional)
-
-For large knowledge bases where keyword scoring adds value. For most users, the memory markdown file is simpler and sufficient.
-
-```
-config/facts/YOUR_SERVER_ID/
-  facts.jsonl
-  projects.jsonl
-```
-
-Each line is a plain string or JSON:
-```json
-"The deadline for Project Falcon is March 15"
-{"fact": "Client XYZ uses Stripe for payments", "tags": ["client", "payments"]}
-```
-
-Enable in server config:
-```json
-{
-  "facts_enabled": true,
-  "fact_path": "/path/to/config/facts/YOUR_SERVER_ID"
-}
+Find your PC's IP:
+```powershell
+ipconfig | findstr "IPv4"
 ```

@@ -1,38 +1,43 @@
 # Environment
 .env
+*.env
 
 # Python
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
 venv/
+.venv/
 *.egg-info/
 
+# Database (contains personal data)
+data/
+*.db
+*.db-wal
+*.db-shm
+
 # Credentials
-config/google_credentials.json
-config/google_token.json
+google_credentials.json
+token.json
+*.json.bak
+
+# Config with personal info
+config/servers/
+config/history/
+config/lore/
+memory/
 
 # Logs
 logs/
 *.log
 *.jsonl
 
-# History
-history/
-
-# Personal memory (contains private info)
-memory/personal.md
-memory/family.md
-memory/dnd.md
-
-# VS Code
-.vscode/
-*.copilot_prompt.md
-
-# Node
-node_modules/
-npm-debug.log
+# Benchmarks results
+benchmarks/results/
 
 # OS
 .DS_Store
 Thumbs.db
+
+# VS Code
+.vscode/
