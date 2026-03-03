@@ -39,7 +39,7 @@ All AI runs **locally on your Pi**. No OpenAI. No Anthropic. No cloud dependency
 Jeeves exposes an **OpenAI + Anthropic-compatible API** on port `8002`, letting you use Claude Code as a full IDE assistant powered entirely by your Pi.
 
 ```
-Claude Code (Windows)
+Claude Code (Windows / Mac / Linux)
     ↓  POST /v1/messages
 Jeeves openai_server.py (:8002)
     ↓  strips system prompts, extracts conversation
@@ -48,12 +48,15 @@ qwen2.5:1.5b via Ollama (Pi)
 Claude Code displays answer
 ```
 
-**Setup (Windows — one time):**
+**Setup (one time):**
 ```powershell
-[System.Environment]::SetEnvironmentVariable("ANTHROPIC_BASE_URL", "http://192.168.1.170:8002", "User")
-[System.Environment]::SetEnvironmentVariable("ANTHROPIC_API_KEY", "sk-ant-api03-aaaa...aaaa-aaaaaaaa", "User")
-# New PowerShell window:
-cd G:\Jeeves && claude
+# Replace <your-pi-ip> with your Pi's local IP address
+[System.Environment]::SetEnvironmentVariable("ANTHROPIC_BASE_URL", "http://<your-pi-ip>:8002", "User")
+[System.Environment]::SetEnvironmentVariable("ANTHROPIC_API_KEY", "sk-ant-api03-your-key-here", "User")
+
+# Open a new terminal, then:
+cd /your/project && claude
+# When prompted "Use this API key?" -> choose Yes
 ```
 
 Full details: [docs/CLAUDE_CODE_INTEGRATION.md](docs/CLAUDE_CODE_INTEGRATION.md)
@@ -64,42 +67,42 @@ Full details: [docs/CLAUDE_CODE_INTEGRATION.md](docs/CLAUDE_CODE_INTEGRATION.md)
 
 ```
 Discord (multiple servers)
-       │
-       ▼
-pi-discord-bot.service              ← asyncio Discord client
-       │  POST /ask
-       ▼
-pi-assistant.service (:8001)        ← HTTP daemon
-       │
-       ├── Tool layer                ← assistant_tools.py (all failures silent)
-       │     ├── !task  ─────────────────────────────────────┐
-       │     ├── !index / !findfile / !findsymbol             │
-       │     ├── !email                                       │
-       │     ├── !calendar                                    ▼
-       │     ├── !design           VS Code Bridge (PC :5055)
-       │     ├── !cast             /open /read /write /run
-       │     └── !vscode ───────→  /copilot/task → SPEC.md → Copilot agent
-       │
-       ├── Brain pipeline            ← qwen2.5:1.5b (always warm)
-       │     ├── Per-server memory (markdown files)
-       │     ├── Fact injection
-       │     └── Ollama /v1/chat/completions
-       │
-       ├── Supervisor                ← background orchestration
-       │     ├── Job queue (index_project, etc.)
-       │     └── Coding tasks (Architect → Coder → QA)
-       │
-       └── openai_server.py (:8002)  ← Claude Code backend
-             ├── POST /v1/messages   (Anthropic format)
-             ├── POST /v1/chat/completions (OpenAI format)
-             └── Strips Claude Code system prompts → passes clean USER turns to brain
+       |
+       v
+pi-discord-bot.service              <- asyncio Discord client
+       |  POST /ask
+       v
+pi-assistant.service (:8001)        <- HTTP daemon
+       |
+       +-- Tool layer                <- assistant_tools.py (all failures silent)
+       |     +-- !task  ----------------------------------------+
+       |     +-- !index / !findfile / !findsymbol               |
+       |     +-- !email                                         |
+       |     +-- !calendar                                      v
+       |     +-- !design           VS Code Bridge (PC :5055)
+       |     +-- !cast             /open /read /write /run
+       |     +-- !vscode ------->  /copilot/task -> SPEC.md -> Copilot agent
+       |
+       +-- Brain pipeline            <- qwen2.5:1.5b (always warm)
+       |     +-- Per-server memory (markdown files)
+       |     +-- Fact injection
+       |     +-- Ollama /v1/chat/completions
+       |
+       +-- Supervisor                <- background orchestration
+       |     +-- Job queue (index_project, etc.)
+       |     +-- Coding tasks (Architect -> Coder -> QA)
+       |
+       +-- openai_server.py (:8002)  <- Claude Code backend
+             +-- POST /v1/messages        (Anthropic format)
+             +-- POST /v1/chat/completions (OpenAI format)
+             +-- Strips Claude Code system prompts -> passes clean USER turns to brain
 
 Streaming:
-  coding_agent → POST /notify → queue
+  coding_agent -> POST /notify -> queue
   Discord bot polls GET /notify every 2s
-  → creates thread on "Task started"
-  → streams all updates into thread
-  → thread auto-archives on completion
+  -> creates thread on "Task started"
+  -> streams all updates into thread
+  -> thread auto-archives on completion
 ```
 
 ---
@@ -133,7 +136,7 @@ Full guide: [docs/INSTALL.md](docs/INSTALL.md)
 | Command | Description |
 |---------|-------------|
 | `!task <description>` | Plan + hand off to Copilot (streams to thread) |
-| `!task <desc> --path G:\myproject` | Specify output directory |
+| `!task <desc> --path /my/project` | Specify output directory |
 | `!index [path]` | Index a project directory |
 | `!findfile <pattern>` | Search indexed files by path fragment |
 | `!findsymbol <name>` | Search indexed Python classes/functions |
@@ -188,11 +191,11 @@ All run locally via [Ollama](https://ollama.ai). No API keys required.
 
 ## Skill System
 
-Jeeves includes a modular skill system with **968+ community skills** plus your own custom skills:
+Jeeves includes a modular skill system powered by the **[antigravity-awesome-skills](https://github.com/sickn33/antigravity-awesome-skills)** community library by [@sickn33](https://github.com/sickn33) — 968+ skills ready to activate. Add your own in `/skills/custom/`.
 
 ```bash
-jeeves !skill install     # index and activate all skills
-jeeves !skill search docker
+jeeves !skill install          # index and activate all skills
+jeeves !skill search docker    # find relevant skills
 jeeves !skill load docker-compose-generator
 ```
 
