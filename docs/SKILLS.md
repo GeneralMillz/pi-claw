@@ -6,6 +6,19 @@ The Pi Assistant includes a **Skill System** that allows Jeeves to dynamically l
 
 ---
 
+## Skill Library — Credit
+
+The community skill library bundled with Jeeves is sourced from:
+
+> **[antigravity-awesome-skills](https://github.com/sickn33/antigravity-awesome-skills)** by [@sickn33](https://github.com/sickn33)
+> 968+ curated skills for Claude Code and AI assistants.
+> All credit for the community library goes to the original author and contributors.
+> Please ⭐ star the original repo if you find it useful.
+
+Custom skills you create live separately in `/mnt/storage/pi-assistant/skills/custom/` and are yours entirely.
+
+---
+
 ## Skill Library Overview
 
 Your skill library lives on the Pi at:
@@ -16,9 +29,9 @@ Your skill library lives on the Pi at:
 
 Two sources:
 
-**1. antigravity-awesome-skills** — A curated library of 968+ community skills, each with a `SKILL.md` file.
+**1. antigravity-awesome-skills** — 968+ community skills by [@sickn33](https://github.com/sickn33), each with a `SKILL.md` file.
 
-**2. Custom skills** — Your own skills live here:
+**2. Custom skills** — Your own skills:
 
 ```
 /mnt/storage/pi-assistant/skills/custom/
@@ -67,7 +80,7 @@ This triggers the full skill ingestion pipeline:
 
 ## How Claude Code Uses Skills
 
-When Claude Code sends a request to Jeeves, the system prompt includes the active skills and skill index. When you ask something technical, Jeeves:
+When Claude Code sends a request to Jeeves, the active skills and skill index are available to the brain. When you ask something technical, Jeeves:
 
 1. **Detects relevant skills** — matches your query against skill metadata
 2. **Loads top-ranked skills** — injects their `SKILL.md` content into the system prompt
@@ -80,8 +93,6 @@ This is called **Skill Auto-Injection**.
 
 ## Skill Auto-Injection
 
-Auto-injection is what makes Jeeves feel like a multi-agent system.
-
 When you ask:
 ```
 Build me a docker-compose file for FastAPI + Redis
@@ -92,13 +103,11 @@ Jeeves:
 2. Finds `docker-compose-generator`
 3. Loads its `SKILL.md`
 4. Injects it into the system prompt
-5. Claude Code generates correct YAML
-
-This gives you consistent output, domain-specific accuracy, reproducible behavior, and modular extensibility.
+5. Generates correct, consistent output
 
 ---
 
-## Adding New Skills
+## Adding Your Own Skills
 
 **1. Create a folder:**
 ```
@@ -145,14 +154,12 @@ Re-indexes only changed skills.
 
 ```
 my-skill/
-    SKILL.md          ← required
+    SKILL.md          <- required
     code/
-        helper.py     ← optional
+        helper.py     <- optional
     assets/
-        example.json  ← optional
+        example.json  <- optional
 ```
-
-Only `SKILL.md` is required.
 
 ---
 
@@ -197,10 +204,16 @@ Jeeves: [loads docker-compose-generator skill]
 | Benefit | Description |
 |---------|-------------|
 | **Modularity** | Add/remove skills without touching core code |
-| **Extensibility** | 968+ skills ready to activate |
+| **Extensibility** | 968+ community skills ready to activate |
 | **Reproducibility** | `SKILL.md` defines behavior declaratively |
 | **Claude Code synergy** | Perfect for tool-use LLMs |
 | **Offline capability** | Everything runs locally on the Pi |
 | **Multi-agent behavior** | Each skill acts like a specialist agent |
 
-This is the same architecture pattern used by LangChain tools, OpenAI function calling, and Anthropic tool use — but running locally, for free.
+---
+
+## Attribution
+
+Community skill library: **[antigravity-awesome-skills](https://github.com/sickn33/antigravity-awesome-skills)** by [@sickn33](https://github.com/sickn33)
+
+Please ⭐ star the original repo if you find it useful.
