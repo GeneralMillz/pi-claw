@@ -1,225 +1,312 @@
-# Architecture
+# 🏗️ ARCHITECTURE.md
 
 ## Overview
 
-Jeeves runs as two systemd services on a Raspberry Pi 5:
+Jeeves is a multi-tool AI assistant daemon running on a Raspberry Pi 5. All user interaction flows through Discord. All local AI inference runs via Ollama. External tools (VS Code bridge, Pinchtab, Gemini API) are reached over LAN or localhost.
 
-| Service | Process | Port |
-|---------|---------|------|
-| `pi-assistant.service` | HTTP daemon + brain + supervisor | 8001 |
-| `pi-discord-bot.service` | asyncio Discord client | — |
+---
+
+## Full System Diagram
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│                         Discord Servers                            │
+│               (multiple servers, multiple channels)                │
+└───────────────────────────┬────────────────────────────────────────┘
+                            │ message events
+                            ▼
+┌───────────────────────────────────────────────────────────────────┐
+│             pi-discord-bot.service  (asyncio)                     │
+│             discord_bot.py — strips prefix, routes               │
+│             POST /ask  ──────────────────────────────────────►    │
+│             GET  /notify  (polls every 1s, streams to channel)    │
+└───────────────────────────┬───────────────────────────────────────┘
+                            │ HTTP :8001
+                            ▼
+┌───────────────────────────────────────────────────────────────────┐
+│             pi-assistant.service  (HTTP daemon)                   │
+│             http_server.py — ThreadingHTTPServer                  │
+│                                                                   │
+│   /ask ──► brain_core.py ──► tool dispatch ──► brain pipeline    │
+│   /notify ──► per-server streaming queue (deque)                  │
+└──────┬────────────────────────────────────────────────────────────┘
+       │
+       ├── !email / !calendar ──────► IMAP / Google Calendar API
+       │
+       ├── !design ────────────────► design_tools.py
+       │                              └── Ollama gemma2:2b
+       │
+       ├── !cast ──────────────────► chromecast_tools.py (pychromecast)
+       │
+       ├── !task / !vscode ────────► VS Code Bridge  (PC :5055)
+       │                              ├── /write  /read  /run  /ls  /open
+       │                              └── /copilot/task
+       │                                    └── writes SPEC.md + pending_prompt.txt
+       │                                          └── VS Code extension polls → Copilot Agent
+       │
+       ├── !browse ────────────────► tools/browser/browser_tools.py
+       │                              └── HTTP localhost:9867
+       │                                    └── Pinchtab (Go binary, systemd)
+       │                                          └── Chromium headless
+       │
+       ├── !android ───────────────► assistant/gemini_agent.py
+       │                              ├── POST api.generativeai.google.com (Gemini 2.0 Flash)
+       │                              ├── parse ### FILE: blocks from response
+       │                              └── POST VS Code Bridge /write  (one file at a time)
+       │
+       └── !markdownify ───────────► assistant/document_ingest.py
+                                      ├── tools/markitdown/convert.py
+                                      ├── markitdown.MarkItDown.convert_stream()
+                                      └── BrainDB  ingested_documents table
+```
+
+---
+
+## Component Details
+
+### pi-discord-bot.service
+- `discord_bot.py` — asyncio, listens on all configured servers simultaneously
+- Strips activation word, POSTs `{server_id, channel, user, content}` to `/ask`
+- Polls `GET /notify?server_id=<id>` every 1 second — delivers streamed output to the right channel
+- Handles Discord file attachments (reads bytes, sends as base64 in payload)
+
+### pi-assistant.service
+- `http_server.py` — stdlib `ThreadingHTTPServer` on port 8001
+- Thread-per-request; SQLite is WAL mode for safe concurrent access
+- `/ask` → `brain_core.py` → tool dispatch, then brain pipeline if no tool matched
+- `/notify` → drains a per-server deque (returns immediately with queued message or empty)
+
+### Tool Dispatcher (`tools/assistant_tools.py`)
+Central router. Every tool import is wrapped in a try/except — missing dependencies stub out silently and Jeeves keeps running.
+
+Each handler returns `(handled: bool, response: str)`. Dispatcher tries in order and returns on first match.
+
+Key handlers:
+
+| Handler | Trigger | Module |
+|---------|---------|--------|
+| `handle_email_tool` | `!email` | `tools/email/email_tools.py` |
+| `handle_calendar_tool` | `!addevent`, `!getevents` | `tools/calendar/calendar_tools.py` |
+| `handle_design_tool` | `!design` | `tools/design/design_tools.py` |
+| `handle_cast_tool` | `!cast` | `tools/cast/chromecast_tools.py` |
+| `handle_vscode_tool` | `!vscode`, `!task` | `tools/vscode/vscode_tools.py` |
+| `handle_browse_tool` | `!browse`, natural lang | `tools/browser/browser_tools.py` |
+| `handle_android_command` | `!android` | `assistant/gemini_agent.py` |
+| `handle_markitdown_command` | `!markdownify`, `!mdoc` | `assistant/markitdown_command.py` |
+
+### Brain Pipeline (`assistant/brain_core.py` + `brain_pipeline.py`)
+Runs when no tool claims the message:
+1. Load conversation history from BrainDB (token-budgeted, newest-first selection)
+2. Inject relevant memory notes (keyword overlap scoring)
+3. POST to Ollama `qwen2.5:1.5b` via `/v1/chat/completions`
+4. Save assistant reply to BrainDB
+
+### BrainDB (`assistant/brain_db.py`)
+SQLite with WAL mode. Single file at `/mnt/storage/pi-assistant/data/jeeves.db`.
+
+| Table | Purpose |
+|-------|---------|
+| `conversations` | Per-server chat history (token-budgeted retrieval) |
+| `projects` | Tracked coding projects |
+| `tasks` + `subtasks` | Task queue and step execution |
+| `agent_runs` | LLM call log (model, input, output, duration) |
+| `memory_notes` | Persistent facts injected into future context |
+| `tool_audit` | Every tool call with input/output/elapsed_ms |
+| `ingested_documents` | MarkItDown-converted files and URLs (full Markdown) |
+| `markitdown_audit` | Conversion success/failure with file hash and duration |
+| `jobs` + `job_runs` | Async job queue |
 
 ---
 
 ## Request Lifecycle
 
-### Normal Chat
-
+### Chat message
 ```
-User: "jeeves what's the weather like?"
-  ↓
-Discord bot (on_message)
-  ↓ POST /ask { user, server_id, channel_name }
-Pi daemon (http_server.py)
-  ↓
-BrainPipeline.process()
-  ├── Tool layer check → no match
-  ├── Load conversation history (SQLite)
-  ├── Load persona + memory
-  └── Call Ollama qwen2.5:1.5b
-  ↓
-Response → Discord channel
+Discord → POST /ask → brain_core.py
+  → tool dispatch (no match)
+  → load history + inject memory
+  → POST Ollama /v1/chat/completions
+  → save to BrainDB
+  → return response → Discord
 ```
 
-### Tool Command
-
+### Tool command
 ```
-User: "jeeves !email unread"
-  ↓
-Discord bot → POST /ask
-  ↓
-BrainPipeline.process()
-  ↓
-ToolRegistry.execute(user_text, context, server_id)
-  ↓ prefix match "!email"
-handle_email_tool(text)
-  ↓
-Response → Discord channel (instant)
+Discord → POST /ask → brain_core.py
+  → tool dispatch → matched handler
+  → external call (Pinchtab / VS Code bridge / etc.)
+  → return result → Discord
 ```
 
-### Task Command (streaming)
-
+### Long-running task (`!android`, `!task`)
 ```
-User: "jeeves !task build a pokemon game in pygame"
-  ↓
-Discord bot → POST /ask
-  ↓
-handle_task_tool(text, server_id="1034...")
-  ↓
-threading.Thread → run_coding_task()  ← returns immediately
-  ↓ "Task started — streaming updates incoming..."
-Discord bot receives response
-  ↓ creates Thread on that message ("🤖 Task in progress")
-
-[Background thread on Pi]:
-  _notify("🤖 Task: ...")           → queued in memory
-  _notify("📁 Project: ...")        → queued
-  _notify("🔍 Type: pygame_game")   → queued
-  _notify("📋 Planning with ...")   → queued
-  [gemma3:4b planning — 3-8 min]
-  _notify("⏳ Still planning (15s)") → every 15s heartbeat
-  ...
-  _notify("✅ Plan ready")
-  _notify("📝 Writing SPEC.md...")
-  POST /copilot/task → VS Code bridge
-  _notify("✅ SPEC.md written on PC")
-  _notify("🚀 VS Code opening...")
-  _notify("🏁 Jeeves done. Copilot is building...")
-
-[Discord bot notify poller — runs every 2s]:
-  GET /notify?server_id=1034...
-  ← {"messages": ["🤖 Task: ...", "📁 Project: ...", ...]}
-  → thread.send() for each message
-  → when "Jeeves done." detected → unregister thread
+Discord → POST /ask → brain_core.py
+  → spawn async loop
+  → POST /notify with incremental updates
+  ← Discord bot polls GET /notify every 1s
+  → Discord sends each update as it arrives
 ```
 
 ---
 
-## Component Map
+## Streaming Architecture
+
+Jeeves uses a lightweight poll-based streaming model to avoid websocket complexity:
+
+1. Long-running tools POST updates to `POST /notify?server_id=<id>&message=<text>`
+2. HTTP daemon queues them in a per-server `deque`
+3. Discord bot polls `GET /notify?server_id=<id>` every 1 second
+4. Queued message is returned and immediately sent to the Discord channel
+5. Empty queue returns 200 with no body (bot keeps polling)
+
+This lets Jeeves stream `[1/7] Writing structure…` → `[2/7] Data layer…` → etc. as each phase completes.
+
+---
+
+## VS Code Bridge
+
+Runs on your **Windows PC** at port 5055. Exposes file I/O and shell execution to the Pi.
+
+```
+Pi (any tool)  →  POST http://192.168.1.153:5055/write
+                        /read
+                        /run
+                        /ls
+                        /open
+                        /copilot/task  → writes SPEC.md + pending_prompt.txt
+                                              ↓
+                                    extension.js polls pending_prompt.txt every 1s
+                                              ↓
+                                    VS Code API opens Copilot Chat + submits prompt
+```
+
+Configure the PC IP in `coding_agent.py`:
+```python
+VSCODE_HOST = "http://192.168.1.153:5055"
+```
+
+---
+
+## Browser Tool (Pinchtab)
+
+A Go binary that wraps Chromium via the DevTools Protocol. Runs as a systemd service on the Pi. No Python browser driver needed.
+
+```
+tools/browser/browser_tools.py
+  → HTTP 127.0.0.1:9867
+  → Pinchtab (pinchtab.service)
+  → Chromium headless
+```
+
+Key endpoints:
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/health` | GET | Liveness check |
+| `/navigate` | POST `{url}` | Go to URL |
+| `/text` | GET | Extract readable page text (~800 tokens) |
+| `/snapshot` | GET `?format=text&filter=interactive` | Accessibility tree with element refs |
+| `/action` | POST `{kind, ref, ...}` | click / fill / press / scroll / hover |
+| `/screenshot` | GET `?quality=80` | JPEG screenshot as base64 |
+| `/tabs` | GET | List open tabs |
+| `/evaluate` | POST `{expression}` | Run JavaScript |
+
+The `browser_tools.py` layer handles: NLP trigger detection, Discord file attachment for screenshots, response truncation to Discord's 2000 char limit, and structured error messages when Pinchtab is unreachable.
+
+See **[BROWSER.md](BROWSER.md)** for full setup and usage.
+
+---
+
+## Android Builder (Gemini Agent)
+
+Autonomous Android app builder that calls the Gemini API directly from the Pi and writes generated files to the PC via the VS Code bridge. No UI automation, no mouse control.
+
+```
+assistant/gemini_agent.py
+  → POST generativelanguage.googleapis.com (Gemini 2.0 Flash, free tier)
+  → parse ### FILE: <path>\n<content> blocks from response
+  → POST http://192.168.1.153:5055/write  (one POST per file)
+  → POST /notify  (progress update to Discord after each phase)
+```
+
+Build phases (7 by default):
+1. Project structure + `build.gradle` files
+2. Room data layer (entities, DAOs, database)
+3. Repository layer
+4. Hilt dependency injection modules
+5. ViewModels
+6. UI (Jetpack Compose or XML)
+7. Navigation + entry point
+
+See **[ANDROID.md](ANDROID.md)** for full setup and usage.
+
+---
+
+## MarkItDown Integration
+
+Universal document ingestion. Converts any file or URL to Markdown and stores it in BrainDB for later retrieval and search.
+
+```
+assistant/document_ingest.py
+  → tools/markitdown/convert.py
+  → markitdown.MarkItDown.convert_stream()  (real API: result.markdown)
+  → INSERT INTO ingested_documents
+  → INSERT INTO markitdown_audit
+  → log_tool_call() in tool_audit
+```
+
+Supports: PDF, Word (.docx), PowerPoint (.pptx), Excel (.xlsx), HTML, plain text, images (OCR), audio (transcription), YouTube transcripts, ZIP, EPubs.
+
+---
+
+## File Layout
 
 ```
 /mnt/storage/pi-assistant/
-├── assistant/
-│   ├── http_server.py       ← HTTP daemon, notify queue, ThreadedHTTPServer
-│   ├── brain.py             ← AssistantBrain (assembles pipeline)
-│   ├── brain_core.py        ← AssistantBase, ToolRegistry, keepalive
-│   ├── brain_pipeline.py    ← process(), history, facts, LLM call
-│   ├── brain_db.py          ← all SQLite access (thread-safe WAL mode)
-│   ├── schema.sql           ← table definitions
-│   ├── supervisor.py        ← background loop: job queue + Architect/Coder/QA
-│   ├── indexer.py           ← project file indexer (AST + LLM summaries)
-│   ├── task_router.py       ← multi-model routing (core/coder/reasoner)
-│   └── audit_log.py         ← tool call log
-│
-├── tools/
-│   ├── assistant_tools.py   ← tool dispatcher (!task, !index, !email, etc.)
-│   ├── coding_agent.py      ← !task orchestration, SPEC.md builder
-│   ├── discord/
-│   │   ├── core.py          ← Discord client, notify poller, thread creation
-│   │   ├── routing.py       ← activation word, channel filtering, rate limiting
-│   │   ├── daemon_client.py ← async HTTP calls to /ask
-│   │   └── ...
-│   ├── vscode/
-│   │   └── vscode_tools.py  ← VS Code bridge client
-│   ├── calendar/            ← Google Calendar integration
-│   ├── email/               ← IMAP/SMTP
-│   ├── design/              ← UI/UX design system generator
-│   ├── cast/                ← Chromecast control
-│   └── sitekit/             ← business site kit generator
-│
-├── config/
-│   ├── config.json          ← global model + system config
-│   ├── servers/             ← per-server JSON configs
-│   ├── personas/            ← persona text files
-│   └── lore/                ← lore documents (for Scribe mode)
-│
-├── memory/                  ← per-server markdown memory files
-├── data/
-│   └── jeeves.db            ← SQLite database
-└── discord_modular.py       ← Discord bot entry point
+  assistant/
+    brain.py                  ← AssistantBrain entry point
+    brain_core.py             ← tool dispatch + pipeline orchestration
+    brain_db.py               ← SQLite BrainDB (WAL mode)
+    brain_pipeline.py         ← LLM call, memory injection
+    gemini_agent.py           ← !android autonomous builder
+    document_ingest.py        ← MarkItDown skill (ingest + store)
+    markitdown_command.py     ← !markdownify / !mdoc Discord handler
+    http_server.py            ← HTTP daemon :8001
+    memory_loader.py          ← memory note injection
+    indexer.py                ← project file indexer
+    summarizer.py             ← Gemma summarization helper
+    task_router.py            ← task queue routing
+  tools/
+    assistant_tools.py        ← central tool dispatcher
+    browser/
+      browser_tools.py        ← Pinchtab HTTP wrapper
+    markitdown/
+      __init__.py
+      convert.py              ← MarkItDown core (also runs as subprocess)
+      errors.py
+      config.py
+    email/email_tools.py
+    calendar/calendar_tools.py
+    cast/chromecast_tools.py
+    design/design_tools.py
+    vscode/vscode_tools.py
+    copilot_tools.py
+  vscode-bridge/              ← runs on Windows PC
+    server.js                 ← Express HTTP bridge :5055
+    extension.js              ← VS Code extension (Copilot injection)
+  data/
+    jeeves.db                 ← SQLite BrainDB
 ```
 
 ---
 
-## Database Schema
+## Security Notes
 
-### Core Tables
-
-| Table | Purpose |
-|-------|---------|
-| `conversations` | Per-server chat history |
-| `projects` | Project registry |
-| `files` | Project file contents + snapshots |
-| `tasks` | Task queue (from Discord `!task`) |
-| `plans` | Architect-generated plans |
-| `subtasks` | Individual implementation steps |
-| `agent_runs` | Architect/Coder/QA execution log |
-| `memory_notes` | Persistent memory per server |
-| `tool_audit` | Every tool call logged |
-| `backlog_items` | QA-generated issue backlog |
-
-### Project Index Tables
-
-| Table | Purpose |
-|-------|---------|
-| `project_files` | Indexed file paths, language, summary, mtime |
-| `project_symbols` | Python classes and functions with line numbers |
-| `project_imports` | Import relationships between files |
-
-### Job Queue Tables
-
-| Table | Purpose |
-|-------|---------|
-| `jobs` | Background job queue (index_project, etc.) |
-| `job_runs` | Job execution history |
-
----
-
-## Supervisor Loop
-
-The supervisor runs as a daemon thread inside `pi-assistant.service`. Every 5 seconds:
-
-1. Check for pending **jobs** (indexing, maintenance) — process one
-2. If no jobs, check for pending **coding tasks** — run Architect → Coder → QA pipeline
-
-This means indexing runs in the background without blocking chat or task responses.
-
----
-
-## Notify Queue (Streaming)
-
-The notify system is how long-running tasks stream progress to Discord without blocking:
-
-```
-coding_agent.py
-  → requests.post("http://127.0.0.1:8001/notify", {server_id, content})
-  → http_server.py appends to in-memory queue[server_id]
-
-Discord bot (asyncio, every 2s)
-  → aiohttp.get("http://127.0.0.1:8001/notify?server_id=...")
-  → http_server.py pops and returns queue
-  → bot sends each message to the active task thread
-```
-
-Key properties:
-- `ThreadedHTTPServer` — `/notify` POST never blocks `/ask` processing
-- Session recreation on failure — poller survives connection drops
-- Thread auto-unregisters when `"Jeeves done."` is detected
-
----
-
-## Multi-Model Routing
-
-`task_router.py` routes prompts to the right model:
-
-| Route | Model | Used For |
-|-------|-------|---------|
-| `core` | `qwen2.5:1.5b` | General chat, always warm |
-| `reasoner` | `gemma3:4b` | Task planning, structured output |
-| `coder` | `qwen2.5-coder:7b` | Code generation |
-| `summarizer` | `gemma2:2b` | File summaries, QA |
-
----
-
-## Project Indexer
-
-`!index [path]` queues a background job. The supervisor runs it between tasks:
-
-1. Walk directory, skip `__pycache__`, `.git`, `venv`, `node_modules`
-2. Detect language from extension
-3. Extract Python symbols (classes, functions, imports) via AST — no LLM needed
-4. Optionally summarize each file with `qwen2.5:1.5b`
-5. Store in `project_files`, `project_symbols`, `project_imports`
-6. Incremental — skips files where `mtime` hasn't changed
-
-`!findfile` and `!findsymbol` query SQLite directly — instant results.
+| Concern | Mitigation |
+|---------|-----------|
+| VS Code bridge on LAN | Trusted LAN only; no auth needed for personal use |
+| Pinchtab | Binds `127.0.0.1` — not reachable from LAN |
+| Gemini API key | Environment variable; never in code or git |
+| Discord bot token | `.env` file, `.gitignore`d |
+| Shell execution (`!vscode run`) | Intentional — Jeeves is a trusted personal tool |
+| SQLite DB | Local file, no network exposure |
