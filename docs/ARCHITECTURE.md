@@ -2,7 +2,7 @@
 
 ## Overview
 
-Jeeves is a multi-tool AI assistant daemon running on a Raspberry Pi 5. All user interaction flows through Discord. All local AI inference runs via Ollama. External tools (VS Code bridge, Pinchtab, Gemini API) are reached over LAN or localhost.
+Jeeves is a multi-tool AI assistant daemon running on a Raspberry Pi 5. All user interaction flows through Discord. All local AI inference runs via Ollama on the Pi or LM Studio on the PC. External tools (VS Code bridge, Pinchtab, Gemini API) are reached over LAN or localhost.
 
 ---
 
@@ -42,7 +42,12 @@ Jeeves is a multi-tool AI assistant daemon running on a Raspberry Pi 5. All user
        │                              ├── /write  /read  /run  /ls  /open
        │                              └── /copilot/task
        │                                    └── writes SPEC.md + pending_prompt.txt
-       │                                          └── VS Code extension polls → Copilot Agent
+       │                                          │
+       │                                          ├──► Continue extension (default)
+       │                                          │      └── Qwen 14B via LM Studio :1234
+       │                                          ├──► cn CLI (--cn flag)
+       │                                          │      └── Qwen 14B via LM Studio :1234
+       │                                          └──► GitHub Copilot (--copilot flag)
        │
        ├── !browse ────────────────► tools/browser/browser_tools.py
        │                              └── HTTP localhost:9867
@@ -58,6 +63,10 @@ Jeeves is a multi-tool AI assistant daemon running on a Raspberry Pi 5. All user
                                       ├── tools/markitdown/convert.py
                                       ├── markitdown.MarkItDown.convert_stream()
                                       └── BrainDB  ingested_documents table
+
+Model Routing (task_router.py):
+  LM Studio online  (PC :1234)  →  Qwen 14B Coder  (primary)
+  LM Studio offline             →  Pi Ollama        (fallback)
 ```
 
 ---
@@ -177,13 +186,49 @@ Pi (any tool)  →  POST http://192.168.1.153:5055/write
                                               ↓
                                     extension.js polls pending_prompt.txt every 1s
                                               ↓
-                                    VS Code API opens Copilot Chat + submits prompt
+                                    ┌─────────────────────────────────┐
+                                    │  Continue (default)             │
+                                    │  continue.focusContinueInput    │
+                                    │  → Qwen 14B via LM Studio :1234 │
+                                    ├─────────────────────────────────┤
+                                    │  cn CLI (--cn flag)             │
+                                    │  fully autonomous, no clicks    │
+                                    │  → Qwen 14B via LM Studio :1234 │
+                                    ├─────────────────────────────────┤
+                                    │  GitHub Copilot (--copilot)     │
+                                    │  workbench.action.chat.open     │
+                                    └─────────────────────────────────┘
 ```
 
 Configure the PC IP in `coding_agent.py`:
 ```python
-VSCODE_HOST = "http://192.168.1.153:5055"
+VSCODE_HOST  = "http://192.168.1.153:5055"
+LMSTUDIO_URL = "http://192.168.1.153:1234"   # task_router.py
 ```
+
+---
+
+## Model Routing (`task_router.py`)
+
+Automatic provider selection at runtime:
+
+```
+route_task() called
+  ↓
+probe http://PC_IP:1234/v1/models  (2s timeout, cached 30s)
+  ↓
+reachable  →  LM Studio  →  Qwen 14B Coder  (qwen2.5-coder-14b-instruct)
+unreachable → Pi Ollama  →  qwen2.5:1.5b (core) / qwen2.5-coder:3b (coder)
+```
+
+Model assignments per task type:
+
+| Task Type | PC Model | Pi Fallback |
+|-----------|----------|-------------|
+| `core` | qwen2.5-coder-14b-instruct | qwen2.5:1.5b |
+| `coder` | qwen2.5-coder-14b-instruct | qwen2.5-coder:3b |
+| `reasoner` | qwen2.5-coder-14b-instruct | qwen2.5:1.5b |
+| `summarizer` | qwen2.5-coder-3b-instruct | qwen2.5:0.5b |
 
 ---
 
@@ -211,15 +256,11 @@ Key endpoints:
 | `/tabs` | GET | List open tabs |
 | `/evaluate` | POST `{expression}` | Run JavaScript |
 
-The `browser_tools.py` layer handles: NLP trigger detection, Discord file attachment for screenshots, response truncation to Discord's 2000 char limit, and structured error messages when Pinchtab is unreachable.
-
-See **[BROWSER.md](BROWSER.md)** for full setup and usage.
-
 ---
 
 ## Android Builder (Gemini Agent)
 
-Autonomous Android app builder that calls the Gemini API directly from the Pi and writes generated files to the PC via the VS Code bridge. No UI automation, no mouse control.
+Autonomous Android app builder that calls the Gemini API directly from the Pi and writes generated files to the PC via the VS Code bridge.
 
 ```
 assistant/gemini_agent.py
@@ -229,27 +270,16 @@ assistant/gemini_agent.py
   → POST /notify  (progress update to Discord after each phase)
 ```
 
-Build phases (7 by default):
-1. Project structure + `build.gradle` files
-2. Room data layer (entities, DAOs, database)
-3. Repository layer
-4. Hilt dependency injection modules
-5. ViewModels
-6. UI (Jetpack Compose or XML)
-7. Navigation + entry point
-
-See **[ANDROID.md](ANDROID.md)** for full setup and usage.
-
 ---
 
 ## MarkItDown Integration
 
-Universal document ingestion. Converts any file or URL to Markdown and stores it in BrainDB for later retrieval and search.
+Universal document ingestion. Converts any file or URL to Markdown and stores it in BrainDB.
 
 ```
 assistant/document_ingest.py
   → tools/markitdown/convert.py
-  → markitdown.MarkItDown.convert_stream()  (real API: result.markdown)
+  → markitdown.MarkItDown.convert_stream()
   → INSERT INTO ingested_documents
   → INSERT INTO markitdown_audit
   → log_tool_call() in tool_audit
@@ -273,29 +303,32 @@ Supports: PDF, Word (.docx), PowerPoint (.pptx), Excel (.xlsx), HTML, plain text
     markitdown_command.py     ← !markdownify / !mdoc Discord handler
     http_server.py            ← HTTP daemon :8001
     memory_loader.py          ← memory note injection
-    indexer.py                ← project file indexer
-    summarizer.py             ← Gemma summarization helper
-    task_router.py            ← task queue routing
+    task_router.py            ← multi-provider model routing (LM Studio / Ollama)
+    coding_agent.py           ← !task orchestration + SPEC.md generation
   tools/
     assistant_tools.py        ← central tool dispatcher
     browser/
       browser_tools.py        ← Pinchtab HTTP wrapper
-    markitdown/
-      __init__.py
-      convert.py              ← MarkItDown core (also runs as subprocess)
-      errors.py
-      config.py
     email/email_tools.py
     calendar/calendar_tools.py
     cast/chromecast_tools.py
     design/design_tools.py
     vscode/vscode_tools.py
-    copilot_tools.py
   vscode-bridge/              ← runs on Windows PC
     server.js                 ← Express HTTP bridge :5055
-    extension.js              ← VS Code extension (Copilot injection)
+    extension.js              ← VS Code extension (Continue / Copilot injection)
   data/
     jeeves.db                 ← SQLite BrainDB
+
+PC (Windows):
+  G:\Jeeves\vscode-bridge\
+    server.js                 ← Node bridge :5055
+    extension.js              ← VS Code extension watcher
+  C:\Users\Jerry\.continue\
+    config.yaml               ← Continue model config (Qwen 14B + Pi fallback)
+  LM Studio models\
+    Qwen2.5-Coder-14B Q4_K_M  ← primary coding agent (8.99 GB)
+    Qwen2.5-Coder-3B  Q4_K_M  ← inline autocomplete (2.1 GB)
 ```
 
 ---
@@ -305,6 +338,7 @@ Supports: PDF, Word (.docx), PowerPoint (.pptx), Excel (.xlsx), HTML, plain text
 | Concern | Mitigation |
 |---------|-----------|
 | VS Code bridge on LAN | Trusted LAN only; no auth needed for personal use |
+| LM Studio on LAN | Trusted LAN only; enable "Serve on Local Network" intentionally |
 | Pinchtab | Binds `127.0.0.1` — not reachable from LAN |
 | Gemini API key | Environment variable; never in code or git |
 | Discord bot token | `.env` file, `.gitignore`d |
