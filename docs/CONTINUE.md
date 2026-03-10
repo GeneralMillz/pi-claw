@@ -101,41 +101,48 @@ node G:\Jeeves\vscode-bridge\server.js
 ### Step 5 — Install VS Code Extension
 
 ```powershell
-$ext = "$env:USERPROFILE\.vscode\extensions\jeeves-continue-bridge"
+$ext = "C:\Users\$env:USERNAME\.vscode\extensions\jeeves-copilot-bridge"
 New-Item -ItemType Directory -Force -Path $ext
 Copy-Item "G:\Jeeves\vscode-bridge\extension.js" "$ext\extension.js" -Force
 Copy-Item "G:\Jeeves\vscode-bridge\package.json"  "$ext\package.json"  -Force
 ```
 
-#### Extension package.json
+> **Note:** VS Code always loads the extension from the `.vscode\extensions` folder. `G:\Jeeves\vscode-bridge\` is the source of truth — copy to extensions after every update.
+
+#### Extension package.json (current)
 
 ```json
 {
-  "name": "jeeves-continue-bridge",
-  "displayName": "Jeeves Continue Bridge",
-  "version": "2.0.0",
-  "engines": { "vscode": "^1.80.0" },
+  "name": "jeeves-copilot-bridge",
+  "displayName": "Jeeves Copilot Bridge",
+  "version": "2.2.0",
+  "engines": { "vscode": "^1.85.0" },
   "activationEvents": ["onStartupFinished"],
   "main": "./extension.js",
   "contributes": {
     "commands": [
-      { "command": "jeeves.startWatcher", "title": "Jeeves: Start Watcher" },
-      { "command": "jeeves.stopWatcher",  "title": "Jeeves: Stop Watcher" }
-    ]
+      { "command": "jeeves.startWatcher", "title": "Jeeves: Start prompt watcher" },
+      { "command": "jeeves.stopWatcher",  "title": "Jeeves: Stop prompt watcher" },
+      { "command": "jeeves.triggerNow",   "title": "Jeeves: Trigger now (read SPEC.md)" }
+    ],
+    "configuration": {
+      "title": "Jeeves Copilot Bridge",
+      "properties": {
+        "jeeves.promptFile":     { "type": "string",  "default": "G:\\Jeeves\\vscode-bridge\\pending_prompt.txt" },
+        "jeeves.pollIntervalMs": { "type": "number",  "default": 1000 },
+        "jeeves.autoStart":      { "type": "boolean", "default": true }
+      }
+    }
   }
 }
 ```
 
 Reload VS Code: `Ctrl+Shift+P` → `Developer: Reload Window`
 
-Confirm it's running: `View → Output → Jeeves Continue Bridge`
-
+Confirm it's running: `Ctrl+Shift+P` → `Developer: Toggle Developer Tools` → Console tab. Look for:
 ```
-[HH:MM:SS] Continue Bridge activating...
-[HH:MM:SS] Bridge dir:   G:\Jeeves\vscode-bridge
-[HH:MM:SS] Prompt file:  G:\Jeeves\vscode-bridge\pending_prompt.txt
-[HH:MM:SS] Chat file:    G:\Jeeves\vscode-bridge\pending_chat.txt
-[HH:MM:SS] Continue Bridge active
+[Extension Host] [Jeeves] Jeeves Agent v2.2 activating...
+[Extension Host] [Jeeves] Watching: G:\Jeeves\vscode-bridge\pending_prompt.txt
 ```
 
 ### Step 6 — Install Continue in VS Code

@@ -25,14 +25,19 @@ Your skill library lives on the Pi at:
 
 ```
 /mnt/storage/pi-assistant/skills/
+├── antigravity-awesome-skills/
+│   └── skills/          ← 978 community skills (SKILLS_ROOT for skill_injector.py)
+└── custom/              ← your own skills
 ```
 
 Two sources:
 
-**1. antigravity-awesome-skills** — 968+ community skills by [@sickn33](https://github.com/sickn33), each with a `SKILL.md` file.
+**1. antigravity-awesome-skills** — 978 community skills by [@sickn33](https://github.com/sickn33), each with a `SKILL.md` file. Installed at:
+```
+/mnt/storage/pi-assistant/skills/antigravity-awesome-skills/skills/
+```
 
 **2. Custom skills** — Your own skills:
-
 ```
 /mnt/storage/pi-assistant/skills/custom/
 ```
@@ -45,6 +50,32 @@ Each skill is a folder:
     (optional) code/
     (optional) assets/
 ```
+
+---
+
+## Two Skill Subsystems
+
+Jeeves has two separate skill tools that serve different purposes:
+
+| Tool | File | Purpose |
+|------|------|---------|
+| `skills_manager.py` | `tools/skills_manager.py` | Discord commands (`!skill *`) — uses repo's `skills_index.json` |
+| `skill_injector.py` | `tools/skill_injector.py` | Coding pipeline only — scans filesystem, injects relevant `SKILL.md` into `SPEC.md` |
+
+**`skill_injector.py`** runs automatically during `!task` — you never call it directly. It scores all skills against the project type keywords and appends the top 3 matches to the SPEC before sending to Continue.
+
+**Correct `SKILLS_ROOT` in `skill_injector.py`:**
+```python
+SKILLS_ROOT   = Path("/mnt/storage/pi-assistant/skills/antigravity-awesome-skills/skills")
+CUSTOM_SKILLS = Path("/mnt/storage/pi-assistant/skills/custom")
+```
+
+**Skill keywords per project type** (used for scoring):
+```python
+"pygame_game": ["pygame", "2d-games", "game-development", "platformer", "arcade", ...]
+"web_app":     ["flask", "fastapi", "web", "api", "rest", "html", ...]
+```
+Keywords match against skill folder names and descriptions. Using specific folder names (e.g. `"2d-games"`) rather than generic words (e.g. `"animation"`) prevents false matches like three.js or anime.js skills appearing in pygame builds.
 
 ---
 

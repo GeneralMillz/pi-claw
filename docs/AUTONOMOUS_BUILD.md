@@ -132,32 +132,45 @@ Exposes the PC filesystem and shell to the Pi over LAN. The Pi treats the PC as 
 2. Writes `SPEC.md`
 3. Opens VS Code with `code --new-window "<project_path>"`
 4. Writes `.continue/autoprompt.md` into the project — the full autonomous build prompt
-5. Writes `pending_prompt.txt` after 5s as a fallback trigger
+5. Writes `pending_prompt.txt` **immediately** (full autoPrompt, not just task text) — any already-open VS Code window picks it up within 1s
+6. Re-writes `pending_prompt.txt` after 8s **only if it was already consumed** — catches the new window once it finishes loading
 
 ---
 
 ### VS Code Extension (`extension.js`)
 
-**Location:** Your Jeeves VS Code extension folder  
-**Runs on:** Windows PC, inside VS Code
+**Location:** `C:\Users\<you>\.vscode\extensions\jeeves-copilot-bridge\`  
+**Runs on:** Windows PC, inside VS Code  
+**Current version:** v2.2
+
+> ⚠️ **Install path:** VS Code loads the extension from `C:\Users\<you>\.vscode\extensions\jeeves-copilot-bridge\`, **not** from `G:\Jeeves\vscode-bridge\`. Always copy both files to the extensions folder after updating.
 
 Bridges the file system trigger to Continue's chat input. Runs inside VS Code as an extension, polling the workspace for signals from the bridge.
 
 **Primary path — `autoprompt.md`:**
 - Polls `{workspace}/.continue/autoprompt.md` every 1 second
 - When found: reads content, deletes file (consume-once), sends to Continue
-- Works in the new project window because the extension runs in every window
+
+**Startup scan (v2.2 — key fix):**
+- On activation, scans for both `autoprompt.md` and `pending_prompt.txt` for 30 seconds
+- Catches files written before the new VS Code window finished loading
+- Without this, the race condition causes Continue to never fire on fresh windows
 
 **Fallback path — `pending_prompt.txt`:**
-- Polls `G:\Jeeves\vscode-bridge\pending_prompt.txt`
-- When found: reads raw task, loads SPEC.md from workspace, builds full autonomous prompt, sends to Continue
+- Polls `G:\Jeeves\vscode-bridge\pending_prompt.txt` every 1 second
+- Contains the **full autoPrompt** (written immediately by `server.js` — no 5s delay)
+- Re-written by `server.js` after 8s if already consumed, as a new-window safety net
 
-**Sending to Continue (v1.2 compatible):**
-1. Writes prompt to VS Code clipboard
-2. Opens new Continue session (`continue.focusContinueInputWithNewSession`)
-3. Focuses Continue input box
-4. Pastes from clipboard (`editor.action.clipboardPasteAction`)
-5. Submits (`continue.acceptInput`)
+**Busy guard (v2.2):**
+- Auto-expires after 10 minutes — prevents permanent lock if a build hangs
+
+**Sending to Continue (3 retries, 3s apart):**
+1. Waits up to 30s for Continue extension to be active
+2. Writes prompt to VS Code clipboard
+3. Opens new Continue session (`continue.focusContinueInputWithNewSession`)
+4. Focuses Continue input box
+5. Pastes from clipboard (`editor.action.clipboardPasteAction`)
+6. Submits (`continue.acceptInput`)
 
 ---
 
@@ -194,29 +207,31 @@ Configures Continue to use LM Studio as the model provider with an autonomous de
 
 2. Pi (coding_agent.py):
    - Detects: pygame_game
-   - Plans with qwen2.5:0.5b
-   - Builds SPEC.md (includes implementation contract)
+   - Plans with qwen2.5:0.5b (pre-filled architecture template — prevents looping)
+   - Injects relevant skills from library (e.g. game-development, 2d-games)
+   - Builds SPEC.md (includes implementation contract + injected skills)
    - POST /copilot/task → bridge
 
-3. PC (server.js):
+3. PC (server.js v4.4):
    - Creates: G:\Jeeves\projects\mega_man_game\
    - Writes:  SPEC.md
    - Writes:  .continue\autoprompt.md  (the full task prompt)
    - Runs:    code --new-window "G:\Jeeves\projects\mega_man_game"
-   - Waits 5s, writes: pending_prompt.txt (fallback)
+   - Writes:  pending_prompt.txt IMMEDIATELY (full prompt, not just task)
+   - After 8s: re-writes pending_prompt.txt IF already consumed (new-window fallback)
 
-4. PC (VS Code + extension.js):
-   - VS Code opens to G:\Jeeves\projects\mega_man_game\
-   - extension.js detects .continue\autoprompt.md
-   - Writes prompt to clipboard
-   - Opens new Continue session
-   - Pastes and submits
+4. PC (VS Code + extension.js v2.2):
+   - Startup scan fires on activation — catches files written before window loaded
+   - Detects autoprompt.md OR pending_prompt.txt (whichever arrives first)
+   - Waits up to 30s for Continue extension to be active
+   - Writes prompt to clipboard, opens new Continue session, pastes, submits
+   - Retries up to 3 times if Continue isn't ready yet
 
 5. PC (Continue + Qwen 14B via LM Studio):
    - read_file SPEC.md
    - ls (see existing files)
    - create_new_file CHECKLIST.md
-   - create_new_file main.py, player.py, enemy.py, etc.
+   - create_new_file main.py, player.py, enemy.py, etc.  (raw Python — no markdown fences)
    - edit_existing_file (implement everything)
    - run_terminal_command "python main.py"
    - (fix errors, run again)
@@ -313,9 +328,12 @@ G:\Jeeves\
 C:\Users\Jerry\.continue\
 └── config.json               ← Continue model + system prompt config
 
-VS Code Extension folder\
-└── extension.js              ← Jeeves agent watcher
+C:\Users\Jerry\.vscode\extensions\jeeves-copilot-bridge\
+├── extension.js              ← Jeeves agent watcher (v2.2)
+└── package.json              ← extension manifest
 ```
+
+> **Important:** VS Code loads extensions from `C:\Users\<you>\.vscode\extensions\`, not from `G:\Jeeves\vscode-bridge\`. After updating either file, copy both to the extensions folder and do `Ctrl+Shift+P` → `Developer: Reload Window`.
 
 ---
 
@@ -349,9 +367,24 @@ const PORT          = 5055;
 
 ## Troubleshooting
 
+### Continue doesn't fire — Output channel is empty
+
+VS Code loaded the extension from the extensions folder, not from `G:\Jeeves\vscode-bridge\`. Always update both locations:
+
+```powershell
+$ext = "C:\Users\Jerry\.vscode\extensions\jeeves-copilot-bridge"
+Copy-Item "G:\Jeeves\vscode-bridge\extension.js" "$ext\extension.js" -Force
+Copy-Item "G:\Jeeves\vscode-bridge\package.json"  "$ext\package.json"  -Force
+```
+
+Then `Ctrl+Shift+P` → `Developer: Reload Window`. Confirm by checking the console (`Ctrl+Shift+P` → `Developer: Toggle Developer Tools`) for:
+```
+[Extension Host] [Jeeves] Jeeves Agent v2.2 activating...
+```
+
 ### VS Code opens a blank window instead of the project folder
 
-The `--folder-uri` flag is unreliable on Windows. The bridge now uses `code --new-window "<path>"` (plain path). If this still fails, check that `code` is in your PATH:
+The `--folder-uri` flag is unreliable on Windows. The bridge uses `code --new-window "<path>"` (plain path). If this still fails, check that `code` is in your PATH:
 
 ```powershell
 node -e "require('child_process').exec('code --version', (e,o) => console.log(o))"
@@ -362,8 +395,9 @@ node -e "require('child_process').exec('code --version', (e,o) => console.log(o)
 `autoprompt.md` was written but the extension didn't fire. Check:
 
 1. **Output panel** → select `Jeeves Agent` to see extension logs
-2. Confirm the extension is installed and enabled in the Extensions sidebar
+2. Confirm version shows `v2.2` in the Developer Console
 3. Try `Ctrl+Shift+P` → `Developer: Reload Window` and run `!task` again
+4. Check `G:\Jeeves\vscode-bridge\pending_prompt.txt` — if it exists and isn't being consumed, the extension isn't running
 
 ### "Last Session" shows in Continue (old context loaded)
 
@@ -376,6 +410,10 @@ The `code` command failed silently. Run this in PowerShell to test:
 ```powershell
 code --new-window "G:\Jeeves\projects\test_folder"
 ```
+
+### SPEC validation failed: architecture looped
+
+The `qwen2.5:0.5b` model repeated the directory block during architecture planning. This is handled automatically — `coding_agent.py` uses a pre-filled template for `pygame_game` projects so the model only needs to fill in Enemy subclass descriptions. On the second attempt, a valid SPEC is passed to Continue regardless. Check telemetry in Discord — `SPEC valid: False` is a warning only; the build still proceeds.
 
 ### Planning takes too long (>30s)
 
@@ -394,6 +432,10 @@ The startup log shows `v4.3` but header says `v4.4` — the old file is still lo
 # Should show v4.4 on both lines:
 Select-String -Path "G:\Jeeves\vscode-bridge\server.js" -Pattern "v4\."
 ```
+
+### Files created with SyntaxError on line 1 (markdown fence bug)
+
+Continue wrote ` ```python ` as the first line of a `.py` file. This is fixed in `server.js` v4.4 — the `autoPrompt` now includes an explicit "CRITICAL FILE CREATION RULES" section with a wrong/right example showing that files must start with raw Python, never markdown fences.
 
 ### Adding a new project type
 
