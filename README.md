@@ -25,11 +25,13 @@ Jeeves is a production-grade, fully self-hosted AI assistant that runs across a 
 - 🔧 **MCP Agent Mode** — natural language multi-tool orchestration via the PC's 14B model
 - 📅 **Manages your calendar** (Google Calendar)
 - 📧 **Reads and sends email** (IMAP/SMTP)
+- 📱 **Builds Android apps** autonomously via Gemini API
 - 🎨 **Generates UI/UX design systems**
 - 📺 **Controls Chromecast** (volume, mute)
 - 📡 **Streams live updates to Discord** during long-running tasks
 - 🗃️ **BrainDB** — SQLite-backed memory, tool audit log, task queue, project tracking
 - ☀️ **Morning briefing** — daily digest of calendar + email + system stats
+- 📘 **978+ skills** — auto-injected into coding tasks based on project type
 
 > **You can rename it.** "Jeeves" is the default activation word and persona. Change it to anything in the server config.
 
@@ -46,13 +48,18 @@ pi-discord-bot.service          ← asyncio Discord client
          ▼
 pi-assistant.service            ← HTTP daemon :8001
          │
+         ├── Tool Registry       ← tool_registry.py (NEW)
+         │     ├── coding-agent  → !task, "build me", "create a", ...
+         │     ├── tools-list    → !tools, !help tools
+         │     └── (extensible via *_tool.py drop-ins)
+         │
          ├── Tool layer          ← assistant_tools.py
-         │     ├── !task  ──────────────────────────────────────┐
-         │     ├── !scrape                                       │
-         │     ├── !browse                                       ▼
-         │     ├── !email         VS Code Bridge (PC :5055)
-         │     ├── !calendar      /open /read /write /ls /run
-         │     ├── !design        SPEC.md → Continue / Cursor
+         │     ├── !scrape
+         │     ├── !browse
+         │     ├── !email
+         │     ├── !calendar
+         │     ├── !android
+         │     ├── !design
          │     └── !cast
          │
          ├── Brain pipeline      ← brain_pipeline.py
@@ -75,6 +82,10 @@ pi-assistant.service            ← HTTP daemon :8001
                ├── Tool audit log
                ├── Memory notes
                └── Project + file index
+
+Skill System (skill_injector.py):
+  978+ skills → keyword scoring → top-3 injected into every SPEC.md
+  Interactive selection (≥5 candidates): Discord menu → user picks
 
 MCP Layer (mcp_registry.py + mcp_client.py):
   Tool catalogue → LM Studio 14B → tool calls → Pi executes → results → final answer → Discord
@@ -117,7 +128,7 @@ chmod +x install.sh
 ./install.sh
 ```
 
-Full guide: **[INSTALL.md](INSTALL.md)**
+Full guide: **[docs/INSTALL.md](docs/INSTALL.md)**
 
 ---
 
@@ -137,18 +148,30 @@ Full guide: **[INSTALL.md](INSTALL.md)**
 | `!scrape price <url>` | Extract price from a product page |
 | `!scrape search <query>` | DuckDuckGo search (ad-filtered) |
 | `!scrape css=<selector> <url>` | CSS selector extraction |
-| `!browse <url>` | Open URL in browser via Pinchtab |
+| `!browse <url>` | Navigate with headless Chromium via Pinchtab |
+| `!browse snap <url>` | Interactive element snapshot with click refs |
+| `!browse click <ref>` | Click element by ref |
+| `!browse screenshot` | Capture viewport as Discord attachment |
 
 ### Coding & VS Code
 | Command | Description |
 |---------|-------------|
-| `!task <description>` | Plan task → write SPEC.md → Continue/Cursor builds it |
+| `!task <description>` | Plan → SPEC.md → Continue/Cursor builds autonomously |
 | `!task <desc> --path /your/path` | Specify output directory |
+| `!task <desc> --cn` | Use cn CLI (fully autonomous, no clicking) |
 | `!vscode ping` | Check VS Code bridge on PC |
 | `!vscode ls <path>` | List directory on PC |
 | `!vscode read <path>` | Read file from PC |
 | `!vscode write <path> <content>` | Write file to PC |
 | `!vscode run <cmd>` | Run shell command on PC |
+
+### Android Builder
+| Command | Description |
+|---------|-------------|
+| `!android <description>` | Build Android app via Gemini API |
+| `!android stop` | Halt current build |
+| `!android status` | Show build phase and iteration count |
+| `!android ping` | Check Gemini + VS Code bridge |
 
 ### Calendar & Email
 | Command | Description |
@@ -158,9 +181,18 @@ Full guide: **[INSTALL.md](INSTALL.md)**
 | `!email unread` | Check unread email |
 | `!email send \| to \| subject \| body` | Send email |
 
+### Skills
+| Command | Description |
+|---------|-------------|
+| `!skill install` | Scan and index all skills |
+| `!skill search <query>` | Search skills by keyword |
+| `!skill list` | List installed skills |
+| `!skill count` | Count skills |
+
 ### System & Debug
 | Command | Description |
 |---------|-------------|
+| `!tools` | List all registered tools |
 | `!latency` | Measure warm-path model response time |
 | `!modelinfo` | Show current model + config |
 | `!audit` | Show last 20 tool call logs |
@@ -168,7 +200,7 @@ Full guide: **[INSTALL.md](INSTALL.md)**
 | `!cast volume 50` | Set Chromecast volume |
 | `!cast mute / unmute` | Mute/unmute Chromecast |
 
-Natural language also works for calendar, email, scrape, and task triggers.
+Natural language also works for calendar, email, scrape, browse, and task triggers.
 
 ---
 
@@ -178,9 +210,10 @@ Natural language also works for calendar, email, scrape, and task triggers.
 |-------|------|----------|------|
 | `qwen2.5:0.5b` | 394MB | Ollama (Pi) | Default chat — fast, snappy replies |
 | `qwen2.5:1.5b` | 986MB | Ollama (Pi) | Reasoning, planning |
-| `qwen2.5-coder:3b` | 1.9GB | Ollama (Pi) | Code generation (Pi-side) |
+| `qwen2.5-coder:3b` | 1.9GB | Ollama (Pi) | Code generation (Pi-side fallback) |
 | `gemma3:4b` | 2.5GB | Ollama (Pi) | Design + summarization |
 | `Qwen2.5-Coder-14B` | 9GB Q4 | LM Studio (PC) | Heavy code, MCP agent orchestration |
+| `Qwen2.5-Coder-3B` | 2.1GB Q4 | LM Studio (PC) | Inline autocomplete in VS Code |
 
 All models run **100% locally**. No OpenAI API. No subscriptions.
 
@@ -201,7 +234,27 @@ Jeeves includes a full MCP (Model Context Protocol) layer for natural language m
 
 All tool calls are logged to BrainDB's `tool_audit` table automatically.
 
-See **[MCP.md](MCP.md)** for the full reference.
+See **[docs/MCP.md](docs/MCP.md)** for the full reference.
+
+---
+
+## Skill System
+
+Every `!task` command automatically injects relevant skills from the 978-skill library into the SPEC before Continue builds. When 5 or more candidate skills are found, Jeeves sends a numbered menu to Discord so you can pick which ones to include.
+
+```
+📘 Candidate skills found (6):
+1. pygame-2d-games
+2. game-development
+3. python-patterns
+4. oop-design
+5. collision-detection
+6. sprite-animation
+
+Reply with numbers (e.g. "1,3"), "all", or Enter to auto-select top 3.
+```
+
+See **[docs/SKILLS.md](docs/SKILLS.md)** for the full reference.
 
 ---
 
@@ -209,11 +262,18 @@ See **[MCP.md](MCP.md)** for the full reference.
 
 | Doc | Contents |
 |-----|----------|
-| [INSTALL.md](INSTALL.md) | Full step-by-step installation guide |
-| [CONFIGURATION.md](CONFIGURATION.md) | Server config, memory, personas, models |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | System design, request lifecycle, streaming |
-| [MCP.md](MCP.md) | MCP layer — registry, client, agent mode, tool catalogue |
-| [COPILOT.md](COPILOT.md) | VS Code + Continue/Cursor orchestration setup |
+| [docs/INSTALL.md](docs/INSTALL.md) | Full step-by-step installation guide |
+| [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Server config, memory, personas, models |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design, request lifecycle, streaming |
+| [docs/AUTONOMOUS_BUILD.md](docs/AUTONOMOUS_BUILD.md) | !task pipeline — coding_agent, VS Code bridge, Continue |
+| [docs/CONTINUE.md](docs/CONTINUE.md) | Continue + LM Studio setup and usage |
+| [docs/COPILOT.md](docs/COPILOT.md) | GitHub Copilot alternative setup |
+| [docs/MCP.md](docs/MCP.md) | MCP layer — registry, client, agent mode, tool catalogue |
+| [docs/SKILLS.md](docs/SKILLS.md) | Skill system — library, injector, custom skills |
+| [docs/BROWSER.md](docs/BROWSER.md) | Pinchtab browser tool — commands and setup |
+| [docs/SCRAPE.md](docs/SCRAPE.md) | Web scraping — content, price, search |
+| [docs/ANDROID.md](docs/ANDROID.md) | Android builder via Gemini API |
+| [docs/CLAUDE_CODE_INTEGRATION.md](docs/CLAUDE_CODE_INTEGRATION.md) | Route Claude Code through Jeeves (zero API cost) |
 
 ---
 
@@ -241,6 +301,10 @@ Actively used in production. Current focus:
 - [x] MCP agent mode with PC 14B orchestration
 - [x] Continue/Cursor SPEC.md pipeline
 - [x] keep_alive warm model management
+- [x] Tool registry — priority-ordered extensible dispatch
+- [x] Skill auto-injection with interactive Discord selection
+- [x] Android builder via Gemini 2.0 Flash
+- [x] MarkItDown universal document ingestion
 - [ ] MCP dashboard tool timeline UI
 - [ ] Scheduled price monitoring via BrainDB jobs
 - [ ] Voice input via Whisper
