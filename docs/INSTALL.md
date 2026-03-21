@@ -20,19 +20,19 @@ curl -fsSL https://ollama.ai/install.sh | sh
 Pull the required models:
 
 ```bash
-ollama pull qwen2.5:1.5b      # core chat — always warm
-ollama pull gemma3:4b          # task planning
-ollama pull qwen2.5-coder:7b   # code generation
-ollama pull gemma2:2b          # summarization / QA
+ollama pull qwen2.5:0.5b      # default chat — always warm (fastest)
+ollama pull qwen2.5:1.5b      # reasoning / fallback for !task
+ollama pull qwen2.5-coder:3b  # code generation (Pi-side fallback)
+ollama pull gemma3:4b          # design + summarization
 ```
 
 Keep models warm permanently:
 
 ```bash
 sudo systemctl edit ollama
-# Add:
-# [Service]
+# Add under [Service]:
 # Environment="OLLAMA_KEEP_ALIVE=-1"
+sudo systemctl daemon-reload
 sudo systemctl restart ollama
 ```
 
@@ -73,7 +73,7 @@ GOOGLE_CREDENTIALS_PATH=/mnt/storage/pi-assistant/google_credentials.json
 Copy and edit the example server config:
 
 ```bash
-cp example.json config/servers/YOUR_SERVER_ID.json
+cp config/servers/example.json config/servers/YOUR_SERVER_ID.json
 nano config/servers/YOUR_SERVER_ID.json
 ```
 
@@ -166,25 +166,48 @@ sudo systemctl start pi-discord-bot
 
 ## 6. Initialize the Database
 
-The database initializes automatically on first start. Verify it was created:
+The database initializes automatically on first start. Verify:
 
 ```bash
 sqlite3 /mnt/storage/pi-assistant/data/jeeves.db ".tables"
 ```
 
-You should see: `conversations`, `projects`, `files`, `tasks`, `jobs`, `project_files`, `project_symbols`, etc.
+You should see: `conversations`, `projects`, `files`, `tasks`, `jobs`, `tool_audit`, `memory_notes`, etc.
 
-Run the project index migration if needed:
+---
+
+## 7. Create the Custom Skills Directory
 
 ```bash
-sqlite3 /mnt/storage/pi-assistant/data/jeeves.db < assistant/003_project_index.sql
+mkdir -p /mnt/storage/pi-assistant/skills/custom
+```
+
+This is where your own `SKILL.md` files go. The directory must exist even if empty or `skill_injector.py` will log a warning.
+
+---
+
+## 8. Install the Skill Libraries
+
+Clone the community libraries:
+
+```bash
+cd /mnt/storage/pi-assistant/skills
+git clone https://github.com/sickn33/antigravity-awesome-skills
+git clone https://github.com/alirezarezvani/claude-skills
+git clone https://github.com/K-Dense-AI/claude-scientific-skills
+```
+
+Then from Discord (once the bot is running):
+
+```
+jeeves !skill install
 ```
 
 ---
 
-## 7. Set Up VS Code Bridge (PC Side)
+## 9. Set Up VS Code Bridge (PC Side)
 
-See **[COPILOT.md](COPILOT.md)** for full instructions.
+See **[CONTINUE.md](CONTINUE.md)** for full instructions.
 
 Short version:
 
@@ -198,28 +221,58 @@ node server.js   # keep this running
 Install the VS Code extension:
 
 ```powershell
-cp extension.js "$env:USERPROFILE\.vscode\extensions\jeeves-copilot-bridge\extension.js" -Force
+$ext = "$env:USERPROFILE\.vscode\extensions\jeeves-copilot-bridge"
+New-Item -ItemType Directory -Force -Path $ext
+Copy-Item "G:\Jeeves\vscode-bridge\extension.js" "$ext\extension.js" -Force
+Copy-Item "G:\Jeeves\vscode-bridge\package.json"  "$ext\package.json"  -Force
 ```
 
 Reload VS Code: `Ctrl+Shift+P` → `Developer: Reload Window`
 
 ---
 
-## 8. Test It
+## 10. Test It
 
 ```bash
 # Check daemon is up
-curl http://localhost:8001/ask -d '{"user":"ping","server_id":"test","channel_name":"test"}'
+curl http://localhost:8001/ask \
+  -H "Content-Type: application/json" \
+  -d '{"user":"ping","server_id":"test","channel_name":"test"}'
+
+# Verify tool registry loaded
+sudo journalctl -u pi-assistant -n 20 | grep TOOLS
 
 # Check Discord bot
 sudo journalctl -u pi-discord-bot -f
 ```
 
 In Discord:
+
 ```
-jeeves !ping
 jeeves hello
+jeeves !tools
 jeeves !task build a snake game in pygame
+```
+
+---
+
+## Deploying Updated Files
+
+After any session that produces new Pi-side files, the standard deploy sequence:
+
+```bash
+# Copy to service location
+cp coding_agent.py  /mnt/storage/pi-assistant/tools/coding_agent.py
+cp skill_injector.py /mnt/storage/pi-assistant/tools/skill_injector.py
+cp http_server.py   /mnt/storage/pi-assistant/assistant/http_server.py
+cp tool_registry.py /mnt/storage/pi-assistant/assistant/tool_registry.py
+cp brain_pipeline.py /mnt/storage/pi-assistant/assistant/brain_pipeline.py
+
+# Restart
+sudo systemctl restart pi-assistant.service
+
+# Verify no errors
+journalctl -u pi-assistant.service -f
 ```
 
 ---
@@ -229,7 +282,20 @@ jeeves !task build a snake game in pygame
 **Bot restarts every 2 minutes:**
 ```bash
 grep "Restart" /etc/systemd/system/pi-discord-bot.service
-# Should be: Restart=on-failure (NOT Restart=always)
+# Must be: Restart=on-failure  (NOT Restart=always)
+```
+
+**`!task` falls through to LLM chat instead of building:**
+```bash
+# Verify tool_registry is loaded and brain_pipeline imports it
+python3 -c "from assistant.tool_registry import registry; print(registry.list_tools())"
+# Should print coding-agent and tools-list
+```
+
+**`[TOOLS] Handler 'coding-agent' raised: name 'Path' is not defined`:**
+```bash
+grep "from pathlib" /mnt/storage/pi-assistant/tools/coding_agent.py
+# Must show: from pathlib import Path
 ```
 
 **Streaming updates not appearing in Discord:**
@@ -240,12 +306,18 @@ sudo journalctl -u pi-assistant --since "5 min ago" | grep NOTIFY
 
 **Model timing out:**
 ```bash
-ollama list   # verify models are present
+ollama list           # verify models are present
 ollama run qwen2.5:1.5b "ping"   # test manually
 ```
 
 **Database errors:**
 ```bash
 sqlite3 /mnt/storage/pi-assistant/data/jeeves.db ".schema" | head -20
-# Re-run migrations if tables are missing
+```
+
+**Skill menu appears but build never continues:**
+
+The `deliver_reply()` path in `http_server.py` v2.1.2 must be present. Check:
+```bash
+grep "deliver_reply\|v2.1.2" /mnt/storage/pi-assistant/assistant/http_server.py
 ```
