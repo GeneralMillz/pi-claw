@@ -274,6 +274,42 @@ See **[docs/SKILLS.md](docs/SKILLS.md)** for the full reference.
 | [docs/SCRAPE.md](docs/SCRAPE.md) | Web scraping — content, price, search |
 | [docs/ANDROID.md](docs/ANDROID.md) | Android builder via Gemini API |
 | [docs/CLAUDE_CODE_INTEGRATION.md](docs/CLAUDE_CODE_INTEGRATION.md) | Route Claude Code through Jeeves (zero API cost) |
+| [docs/DISCOVERY.md](docs/DISCOVERY.md) | Discovery Layer — auto-index GitHub repos in /skills and /tools |
+
+---
+
+## Discovery Layer
+
+Jeeves automatically indexes any GitHub repository you drop into `/skills/` or `/tools/` directories. The Discovery Layer scans these folders on a schedule, classifies each repo by type (skill, tool, or mixed), and displays them in the dashboard with search, filter, and stats.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ Systemd timer (every 5 min)                                     │
+│           ↓                                                      │
+│ discover.py scans /skills/* and /tools/*                        │
+│   • Classifies by Option C hybrid rules                          │
+│   • Computes size and mtime recursively                         │
+│   • Writes discovery/index.json atomically                      │
+│           ↓                                                      │
+│ HTTP API (/api/discovery) + Dashboard Panel (DiscoveryView.js)  │
+│   • Search by name, path, or .md files                          │
+│   • Filter by type (skill, tool, mixed) or source               │
+│   • View metadata: file counts, size, modified date             │
+│           ↓                                                      │
+│ Zero impact on skill_injector, tool_registry, skills_manager    │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Classification rules (Option C hybrid):**
+- `SKILL.md` at depth 1 → **skill**
+- Else `README.md` → **skill**
+- Else ≥2 `.md` files → **skill**
+- Else 1 `.md` file → **skill**
+- Else `.py` files only → **tool**
+- Else both `.md` + `.py` → **mixed**
+- Else → skip (ignored)
+
+See **[docs/DISCOVERY.md](docs/DISCOVERY.md)** for full technical reference.
 
 ---
 

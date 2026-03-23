@@ -81,3 +81,19 @@ cd G:\Jeeves && claude   # choose option 1 (Yes) when prompted
 - Keep responses short — `qwen2.5:1.5b` has limited context
 - Do not reference Claude-specific capabilities (artifacts, web search, etc.)
 - Prefer direct answers over lengthy explanations
+
+---
+
+## Discovery Layer
+
+Jeeves includes an optional **Discovery subsystem** (`/discovery/`) that automatically indexes repos dropped into `/skills/` and `/tools/` directories and displays them in the dashboard.
+
+**Key files:**
+- `discovery/discover.py` — scanner (runs via systemd timer every 5 min)
+- `discovery/api.py` — pure API module
+- `jeeves-ui/server.py` — HTTP routes for dashboard
+- `jeeves-ui/static/components/views/DiscoveryView.js` — dashboard panel
+
+**Important:** Discovery is **completely separate** from skill injection and tool registry. Removing it has zero impact on other systems.
+
+See [`docs/DISCOVERY.md`](docs/DISCOVERY.md) for full technical reference.
