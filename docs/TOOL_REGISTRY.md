@@ -165,3 +165,33 @@ assistant/brain_pipeline.py   ← calls registry.execute()
 assistant/http_server.py      ← imports coding_agent for deliver_reply
 tools/coding_agent.py         ← registered as "coding-agent" handler
 ```
+
+---
+
+## Discovery Layer vs. Tool Registry
+
+**Discovery** is a separate subsystem for indexing and displaying tool repos in the dashboard. It has **zero impact** on the Tool Registry.
+
+| Aspect | Tool Registry | Discovery |
+|--------|---|---|
+| **What it scans** | `*_tool.py` files anywhere in codebase | Top-level dirs in `/tools/` |
+| **What it indexes** | Registered tool handlers (name, triggers, priority) | Repo metadata (type, files, size, date) |
+| **Purpose** | Priority-ordered dispatch for `!task`, `!tools`, etc. | Dashboard display of tool repos |
+| **Called on** | Every message that reaches brain_pipeline.py | Systemd timer (5min) + manual refresh |
+| **Affects** | Which handler processes a user command | DiscoveryView.js table only |
+| **Data stored** | In-memory registry (no persistent file) | discovery/index.json (machine-generated) |
+
+**Key guarantee:** Discovery indexes *repos* (`/tools/awesome-tool/`, `/tools/mcp-server/`), not individual tools. It never reads or writes the Tool Registry. If a user drops a new repo into `/tools/`, Discovery will index it, but it won't auto-register the repo as a handler. Registration is still explicit via `@registry.tool()` decorator or `registry.register()` call.
+
+### Example Workflow
+
+1. User clones a new tool repo: `git clone https://github.com/user/my-tool /mnt/storage/pi-assistant/tools/my-tool`
+2. Systemd timer runs `discover.py` (or user hits "Refresh")
+3. Discovery indexes `my-tool` repo → adds entry to `index.json`
+4. DiscoveryView.js fetches `/api/discovery` → table now shows `my-tool`
+5. If user wants `my-tool` to handle commands:
+   - User adds `@registry.tool(triggers=["!mytool"], ...)` inside `my-tool/` or `tool_registry.py`
+   - Registry reloads on next request
+   - `!mytool` now works in Discord
+
+Discovery is for **visibility**. Registration is for **functionality**.

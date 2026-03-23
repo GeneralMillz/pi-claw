@@ -298,6 +298,31 @@ To add a new library, append its path to `_SKILLS_EXTRA` and restart the service
 
 ---
 
+## Discovery Layer vs. Skill Injection
+
+**Discovery** is a separate, non-invasive subsystem for indexing and displaying arbitrary repos in the dashboard. It has **zero impact** on the skill injection pipeline.
+
+| Aspect | Skill Injector | Discovery |
+|--------|---|---|
+| **Scope** | Only `/skills/` subdirs containing `SKILL.md` | Any repo in `/skills/` or `/tools/` |
+| **Scan depth** | Recursively searches subdirs for `SKILL.md` | Top-level dirs only |
+| **Purpose** | Extract skill content → inject into SPEC.md | Index repos for dashboard display |
+| **Triggers on** | Every `!task` command | Systemd timer (5min) + manual refresh |
+| **Affects** | Continue/Cursor code generation | DiscoveryView.js table only |
+| **Data flow** | Injected text → SPEC.md → LLM → code | Metadata → index.json → HTTP API → dashboard |
+| **Can fail?** | If ≥5 candidates, awaits Discord reply | Never blocks; graceful degradation |
+
+**Key guarantee:** Disabling or removing the entire Discovery subsystem has **zero effect** on skill injection. The two systems are orthogonal.
+
+### When to Use Which
+
+- **Skill Injector** — if you want your coding tasks to automatically include best-practices constraints from specific folders
+- **Discovery** — if you want to browse and monitor all repos in your skill/tool library from the dashboard
+
+Most users will keep both enabled. Discovery is optional; skill injection is core.
+
+---
+
 ## Attribution
 
 Primary community library: **[antigravity-awesome-skills](https://github.com/sickn33/antigravity-awesome-skills)** by [@sickn33](https://github.com/sickn33)

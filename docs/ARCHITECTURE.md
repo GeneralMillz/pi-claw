@@ -368,3 +368,224 @@ PC (Windows):
 | Discord bot token | `.env` file, `.gitignore`d |
 | Shell execution (`!vscode run`) | Intentional — Jeeves is a trusted personal tool |
 | SQLite DB | Local file, no network exposure |
+
+---
+
+## Discovery Layer
+
+The **Discovery subsystem** automatically indexes any GitHub repository dropped into `/skills/` or `/tools/` directories and displays them in the dashboard with search, filtering, and statistics.
+
+### Component Map
+
+```
+/mnt/storage/pi-assistant/discovery/
+  ├── discover.py        ← standalone scanner (runs via systemd timer)
+  ├── api.py             ← pure module: read_index(), search(), filter_by_type()
+  └── index.json         ← output: array of repo entries (machine-generated)
+
+HTTP API routes:
+  /api/discovery         ← GET, returns filtered index
+  /api/discover/refresh  ← POST, triggers scanner immediately
+  /api/discovery/summary ← GET, returns stats (total, by_type, by_source, last_scanned)
+
+Dashboard:
+  DiscoveryView.js       ← React panel with search, filters, table
+  constants.js           ← added "discovery" to NAV_VIEWS
+  app.js                 ← added router branch for discovery view
+```
+
+### Data Flow
+
+```
+[systemd jeeves-discover.timer — every 5 minutes]
+            ↓
+discover.py
+  • walk /skills/* (top-level subdirs only)
+  • walk /tools/*  (top-level subdirs only)
+  • apply Option C hybrid classification per repo dir
+  • compute size + newest mtime recursively
+  • write /discovery/index.json (atomic: tmp → rename)
+            ↓
+[Dashboard user opens Discovery panel]
+            ↓
+DiscoveryView.js → fetch("/api/discovery?type_filter=TYPE&source_filter=SOURCE")
+            ↓
+FastAPI route /api/discovery
+  • imports discovery.api
+  • calls api.read_index()
+  • filters by type and source
+  • returns JSON array
+            ↓
+React table renders: name | type badge | source | md_files | py_files | size | modified
+```
+
+### Classification Rules (Option C Hybrid)
+
+For each top-level subdir under `/skills/` or `/tools/`:
+
+```
+Has SKILL.md (depth 1)?         → type = "skill"
+  else Has README.md?           → type = "skill"
+  else Has ≥2 .md files?        → type = "skill"
+  else Has exactly 1 .md file?  → type = "skill"
+  else Has any .py files?       → type = "tool"
+  else Has both .md + .py?      → type = "mixed"
+  else                          → skip (ignore)
+```
+
+**Field definitions:**
+- `name` — top-level directory name
+- `type` — "skill", "tool", or "mixed"
+- `source` — "skills" or "tools" (which root dir)
+- `path` — absolute filesystem path
+- `md_files` — list of .md file paths at depth 1
+- `py_files` — list of .py file paths at depth 1
+- `size` — total bytes (recursive)
+- `modified` — ISO 8601 timestamp of newest file
+
+### Isolation Guarantees
+
+Discovery **never touches** these existing systems:
+
+| Existing System | Scan Level | Index File | Affected? |
+|---|---|---|---|
+| skill_injector.py | Sub-skill dirs inside repo | none (live scan) | ❌ **No** |
+| skills_manager.py | SKILL.md inside antigravity repo | skills_index.json | ❌ **No** |
+| tool_registry.py | *_tool.py anywhere in tools/ | none (live scan) | ❌ **No** |
+| **discover.py (new)** | **top-level repo dirs** | **discovery/index.json** | ✅ **New file** |
+
+The three levels operate independently at different granularities. Deleting `/discovery/` entirely has **zero impact** on skill injection, tool dispatch, or brain pipeline.
+
+### Systemd Automation
+
+Two units ensure automatic scanning:
+
+**jeeves-discover.timer:**
+```ini
+[Unit]
+Description=Jeeves Discovery Scanner Timer
+After=network-online.target
+
+[Timer]
+OnBootSec=60s
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+**jeeves-discover.service:**
+```ini
+[Unit]
+Description=Jeeves Discovery Scanner
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/mnt/storage/pi-assistant/venv/bin/python3 /mnt/storage/pi-assistant/discovery/discover.py
+WorkingDirectory=/mnt/storage/pi-assistant
+User=pi
+StandardOutput=journal
+StandardError=journal
+```
+
+On boot, the scanner runs after 60 seconds. Then every 5 minutes, the timer triggers a fresh scan. If systemd units are not installed, the HTTP `/api/discover/refresh` endpoint can be called manually (e.g., via cron or the dashboard UI).
+
+### API Endpoints
+
+#### `GET /api/discovery`
+
+**Query parameters:**
+- `type_filter` — "all" (default), "skill", "tool", or "mixed"
+- `source_filter` — "all" (default), "skills", or "tools"
+
+**Response:**
+```json
+{
+  "ok": true,
+  "index": [
+    {
+      "name": "awesome-systematic-trading",
+      "type": "skill",
+      "source": "skills",
+      "path": "/mnt/storage/pi-assistant/skills/awesome-systematic-trading",
+      "md_files": ["/mnt/storage/.../README.md"],
+      "py_files": [],
+      "size": 245120,
+      "modified": "2026-03-23T11:00:00"
+    }
+  ]
+}
+```
+
+#### `POST /api/discover/refresh`
+
+Triggers `discover.py` immediately. Writes updated `index.json` atomically.
+
+**Response:**
+```json
+{
+  "ok": true,
+  "message": "Discovery scan completed in 2.3s"
+}
+```
+
+#### `GET /api/discovery/summary`
+
+Returns aggregate stats.
+
+**Response:**
+```json
+{
+  "ok": true,
+  "total": 33,
+  "by_type": {
+    "skill": 22,
+    "tool": 8,
+    "mixed": 3
+  },
+  "by_source": {
+    "skills": 25,
+    "tools": 8
+  },
+  "last_scanned": "2026-03-23T14:32:18"
+}
+```
+
+### Dashboard Integration
+
+**DiscoveryView.js** renders:
+1. **Summary stats grid** — total repos, counts by type (matching .node-grid pattern)
+2. **Filter controls** — type + source buttons, search input, refresh button
+3. **Table** — searchable, filterable; shows all metadata with hover states
+4. **Footer** — "Showing X of Y repos" + last scanned timestamp
+
+All styling uses Jeeves CSS variables (--amber, --green2, --blue2, --text, --bg3, --border) for visual consistency.
+
+### Verification Steps
+
+```bash
+# 1. Run scanner manually
+python3 discovery/discover.py
+cat discovery/index.json | python3 -m json.tool | head -60
+
+# 2. Verify classification
+python3 -c "
+import json
+idx = json.load(open('discovery/index.json'))
+for e in idx: print(e['type'].ljust(8), e['source'].ljust(8), e['name'])
+"
+
+# 3. Test HTTP endpoints
+curl http://localhost:8100/api/discovery | python3 -m json.tool
+curl http://localhost:8100/api/discovery/summary | python3 -m json.tool
+
+# 4. Open dashboard, navigate to Discovery panel
+# Confirm: table renders, filters work, type badges correct
+
+# 5. Regression checks
+curl http://localhost:8001/health       # daemon still responds
+!skill search                           # skill injection still works
+!task build something                   # coding pipeline still works
+```
